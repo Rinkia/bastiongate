@@ -60,6 +60,7 @@ _FWD_RESP_HEADERS = {"mcp-session-id", "mcp-protocol-version"}
 AUTH_HEADER = "X-Bastiongate-Key"
 AUTH_MAX_FAILS = 10  # failed auths per IP per window before throttling
 AUTH_WINDOW = 60.0  # seconds
+METRICS_PATH = "/__bastiongate/metrics"
 
 
 def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None = None):
@@ -92,6 +93,7 @@ def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None =
             if _throttled(ip):
                 self._drain_body()
                 trace.emit("http_auth_throttled", ip=ip)
+                gate._bump("http_auth_throttled")
                 self._simple(429, "too many failed auth attempts")
                 return False
             given = self.headers.get(AUTH_HEADER, "")
@@ -100,6 +102,7 @@ def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None =
             _record_fail(ip)
             self._drain_body()
             trace.emit("http_auth_rejected", path=self.path)
+            gate._bump("http_auth_rejected")
             self._simple(401, "missing or invalid " + AUTH_HEADER)
             return False
 
@@ -140,6 +143,10 @@ def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None =
 
         # server-initiated stream (notifications, sampling)
         def do_GET(self):
+            if self.path.rstrip("/") == METRICS_PATH:
+                if not self._authed():
+                    return
+                return self._json(200, gate.metrics_snapshot())
             if not self._authed():
                 return
             self._forward("GET", None, self.headers.get("Mcp-Session-Id"))

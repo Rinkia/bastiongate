@@ -107,6 +107,10 @@ both gated. Binds `127.0.0.1` by default. Add `--auth-key KEY` (or env
 `BASTIONGATE_PROXY_KEY`) to require an `X-Bastiongate-Key` header on every
 request; the key is compared in constant time and never forwarded upstream.
 
+`GET /__bastiongate/metrics` returns a JSON counter of what the gate has caught
+(blocks by type, tools dropped, pending/session counts). It's auth-gated when a
+key is set. In stdio mode the same counters are written to the trace at exit.
+
 ### Deeper result inspection (agentbastion)
 
 `result_inspector: agentbastion` swaps the static signature scan for
@@ -128,6 +132,11 @@ The semantic detector needs an embedder, chosen by env:
   `all-MiniLM-L6-v2`). Result text never leaves the process. **Preferred.**
 - `BASTIONGATE_EMBED_URL` — a self-hosted embeddings endpoint (result text is
   POSTed to it).
+
+The model is loaded and its templates embedded **at gate startup** (not on the
+first result), bounded by `BASTIONGATE_EMBED_INIT_TIMEOUT` (default 120s); set
+`BASTIONGATE_EMBED_WARM=0` to defer. For air-gapped hosts, pre-cache the model
+and set `HF_HUB_OFFLINE=1` — the first uncached load fetches from HuggingFace.
 
 ## Try it
 
@@ -157,9 +166,10 @@ out = gate.handle_server_msg(response)          # server -> agent
   `send_email` tool actually needs. Scope it with a per-tool `scrub_args: false`
   or `on_pii_arg: warn` (see `tools:` above). Scrubbing is best-effort DLP:
   base64-encoded or field-split secrets can slip through.
-- Result scrub covers both `text` content blocks and `structuredContent`.
+- Result scrub covers both `text` content blocks and `structuredContent`, and
+  the injection scan reads `structuredContent` too (not only text blocks).
 - The HTTP listener throttles an IP after repeated auth failures (`429`), and
-  correlation state is bounded per session with an idle TTL.
+  correlation state is bounded per session (LRU eviction) with an idle TTL.
 - **The HTTP proxy adds no auth of its own.** It binds `127.0.0.1` by default
   and passes the client's `Authorization` header through to the upstream. Do
   not bind a public interface without an auth layer in front.

@@ -80,6 +80,24 @@ def test_local_embedder_end_to_end_flags(monkeypatch):
     assert not inspect("perfectly benign text").allowed  # semantic tier fires via local model
 
 
+def test_semantic_warms_model_at_build(monkeypatch):
+    pytest.importorskip("agentbastion")
+    from bastiongate.integrations import agentbastion as integ
+    from bastiongate.policy import GatePolicy
+
+    fake = _FakeSTModel()
+    calls = []
+    real_encode = fake.encode
+    fake.encode = lambda texts, normalize_embeddings=True: (calls.append(1) or real_encode(texts, normalize_embeddings))
+
+    monkeypatch.setenv("BASTIONGATE_EMBED_MODEL", "fake-model")
+    monkeypatch.delenv("BASTIONGATE_EMBED_URL", raising=False)
+    monkeypatch.setattr(integ, "_load_st_model", lambda name: fake)
+
+    integ.build_inspector(GatePolicy(result_inspector="agentbastion", inspector_semantic=True))
+    assert calls  # model.encode ran during build = warmed, not on first result
+
+
 def test_no_embedder_configured_errors(monkeypatch):
     pytest.importorskip("agentbastion")
     from bastiongate.integrations import agentbastion as integ

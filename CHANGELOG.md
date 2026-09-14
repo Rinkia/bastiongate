@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0
+
+- **structuredContent injection scan**: the result injection check now reads
+  `structuredContent` (JSON results), not only text content blocks.
+- **True-LRU session eviction**: the correlation session table evicts the
+  least-recently-used session (was FIFO) under the `MAX_SESSIONS` backstop.
+- **Embedder warmed at startup**: the semantic model loads and embeds its
+  templates when the gate starts (bounded by `BASTIONGATE_EMBED_INIT_TIMEOUT`),
+  so the first real result isn't stuck behind a cold load. `BASTIONGATE_EMBED_WARM=0`
+  defers it. Air-gap: pre-cache the model + `HF_HUB_OFFLINE=1`.
+- **Metrics**: `GET /__bastiongate/metrics` (auth-gated) returns block/redact/
+  drop counters; stdio mode writes them to the trace at exit.
+
 ## 0.5.0
 
 - **Local semantic embedder**: `inspector_semantic` can now use an in-process

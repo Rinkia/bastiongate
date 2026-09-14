@@ -196,6 +196,16 @@ def test_auth_throttles_after_repeated_failures(authed_gate):
     assert 429 in codes  # throttled once the window fills
 
 
+def test_http_metrics_endpoint(gate_over_http):
+    # trigger one poisoned-tool drop, then read metrics
+    _post(gate_over_http, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+    base = gate_over_http.rsplit("/mcp", 1)[0]
+    with urllib.request.urlopen(base + "/__bastiongate/metrics", timeout=10) as r:
+        m = json.loads(r.read())
+    assert m.get("tools_dropped", 0) >= 1
+    assert "pending_entries" in m
+
+
 def test_http_clean_call_roundtrips(gate_over_http):
     resp = _post(gate_over_http, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                                   "params": {"name": "echo", "arguments": {"text": "hi"}}})

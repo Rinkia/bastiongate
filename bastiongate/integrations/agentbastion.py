@@ -37,6 +37,8 @@ def build_inspector(policy: GatePolicy):
         # a verdict cache spares repeat results the judge/semantic round-trip
         cache = _cache() if judge else None
         firewall = Firewall(inbound=InboundGuard(judge=judge, detectors=detectors, cache=cache))
+        if policy.inspector_semantic:
+            _warm(firewall)  # load the model + embed templates now, not on first result
     else:
         firewall = Firewall()  # heuristic only
 
@@ -49,6 +51,32 @@ def build_inspector(policy: GatePolicy):
         return Decision(False, f"agentbastion blocked: {verdict.reason}", tuple(verdict.matches))
 
     return inspect
+
+
+def _warm(firewall) -> None:
+    """Force the semantic model to load and embed its templates at startup, so
+    the first real result isn't stuck behind a cold model load. Bounded by a
+    timeout so a hung/huge download fails fast instead of hanging forever."""
+    if os.environ.get("BASTIONGATE_EMBED_WARM", "1") == "0":
+        return
+    import threading
+
+    timeout = float(os.environ.get("BASTIONGATE_EMBED_INIT_TIMEOUT", "120"))
+    err: list[Exception] = []
+
+    def run():
+        try:
+            firewall.check_tool_result("warmup")
+        except Exception as e:  # surface at startup, not per-request
+            err.append(e)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        raise RuntimeError(f"semantic embedder init timed out after {timeout}s")
+    if err:
+        raise err[0]
 
 
 def _cache():
