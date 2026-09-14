@@ -19,7 +19,7 @@ from __future__ import annotations
 from .policy import GatePolicy, from_dict, load_policy
 from .proxy import Gate, run_stdio
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 def run_http(*args, **kwargs):

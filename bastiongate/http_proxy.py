@@ -18,6 +18,7 @@ are fully gated. Add per-element batch gating if batching ever shows up in use.
 
 from __future__ import annotations
 
+import hmac
 import json
 import urllib.error
 import urllib.parse
@@ -53,15 +54,38 @@ _FWD_REQ_HEADERS = {"content-type", "accept", "mcp-session-id", "mcp-protocol-ve
 _FWD_RESP_HEADERS = {"mcp-session-id", "mcp-protocol-version"}
 
 
-def make_handler(upstream: str, gate: Gate, trace: Trace):
+AUTH_HEADER = "X-Bastiongate-Key"
+
+
+def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None = None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, *a):  # silence default stderr spam
             pass
 
+        def _authed(self) -> bool:
+            if not auth_key:
+                return True
+            given = self.headers.get(AUTH_HEADER, "")
+            if hmac.compare_digest(given, auth_key):
+                return True
+            # drain the request body so closing the socket doesn't reset the
+            # client before it reads the 401
+            length = int(self.headers.get("Content-Length") or 0)
+            if 0 < length <= MAX_BODY:
+                try:
+                    self.rfile.read(length)
+                except OSError:
+                    pass
+            trace.emit("http_auth_rejected", path=self.path)
+            self._simple(401, "missing or invalid " + AUTH_HEADER)
+            return False
+
         # --- agent -> server ---------------------------------------------------
         def do_POST(self):
+            if not self._authed():
+                return
             length = int(self.headers.get("Content-Length") or 0)
             if length > MAX_BODY:
                 return self._simple(413, "request too large")
@@ -71,26 +95,31 @@ def make_handler(upstream: str, gate: Gate, trace: Trace):
             except json.JSONDecodeError:
                 return self._simple(400, "invalid JSON body")
 
+            session = self.headers.get("Mcp-Session-Id")
             body = raw
             if isinstance(msg, dict):
-                forward, reply = gate.handle_client_msg(msg)
+                forward, reply = gate.handle_client_msg(msg, session)
                 if reply is not None:
                     return self._json(200, reply)  # blocked before upstream
                 body = json.dumps(forward).encode("utf-8")
             else:
                 trace.emit("http_batch_passthrough", n=len(msg) if isinstance(msg, list) else 0)
 
-            self._forward("POST", body)
+            self._forward("POST", body, session)
 
         # server-initiated stream (notifications, sampling)
         def do_GET(self):
-            self._forward("GET", None)
+            if not self._authed():
+                return
+            self._forward("GET", None, self.headers.get("Mcp-Session-Id"))
 
         def do_DELETE(self):
-            self._forward("DELETE", None)
+            if not self._authed():
+                return
+            self._forward("DELETE", None, self.headers.get("Mcp-Session-Id"))
 
         # --- forward to upstream, transform response --------------------------
-        def _forward(self, method: str, body: bytes | None):
+        def _forward(self, method: str, body: bytes | None, session=None):
             req = urllib.request.Request(upstream, data=body, method=method)
             for h, v in self.headers.items():
                 if h.lower() in _FWD_REQ_HEADERS:
@@ -106,16 +135,16 @@ def make_handler(upstream: str, gate: Gate, trace: Trace):
 
             ctype = resp.headers.get("Content-Type", "")
             if ctype.startswith("text/event-stream"):
-                self._stream_sse(resp)
+                self._stream_sse(resp, session)
             else:
-                self._relay_json(resp)
+                self._relay_json(resp, session)
 
-        def _relay_json(self, resp):
+        def _relay_json(self, resp, session):
             data = resp.read(MAX_BODY)
             out = data
             try:
                 parsed = json.loads(data)
-                parsed = self._transform(parsed)
+                parsed = self._transform(parsed, session)
                 out = json.dumps(parsed).encode("utf-8")
             except json.JSONDecodeError:
                 pass  # non-JSON (e.g. empty 202); relay verbatim
@@ -126,22 +155,22 @@ def make_handler(upstream: str, gate: Gate, trace: Trace):
             self.end_headers()
             self.wfile.write(out)
 
-        def _stream_sse(self, resp):
+        def _stream_sse(self, resp, session):
             self.send_response(resp.status)
             self._copy_resp_headers(resp)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             for event in _iter_sse_events(resp):
-                out = _transform_sse_event(event, self._transform)
+                out = _transform_sse_event(event, lambda p: self._transform(p, session))
                 self.wfile.write(out.encode("utf-8"))
                 self.wfile.flush()
 
-        def _transform(self, parsed):
+        def _transform(self, parsed, session=None):
             if isinstance(parsed, dict):
-                return gate.handle_server_msg(parsed)
+                return gate.handle_server_msg(parsed, session)
             if isinstance(parsed, list):
-                return [gate.handle_server_msg(m) if isinstance(m, dict) else m for m in parsed]
+                return [gate.handle_server_msg(m, session) if isinstance(m, dict) else m for m in parsed]
             return parsed
 
         # --- small response helpers -------------------------------------------
@@ -160,6 +189,9 @@ def make_handler(upstream: str, gate: Gate, trace: Trace):
             self.wfile.write(out)
 
         def _simple(self, status, text):
+            # error paths may leave an unread request body; close rather than
+            # keep-alive so the client isn't reset mid-response.
+            self.close_connection = True
             out = text.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "text/plain")
@@ -216,15 +248,16 @@ def _transform_sse_event(lines: list[str], transform) -> str:
 
 
 def run_http(upstream: str, policy: GatePolicy, host: str = "127.0.0.1",
-             port: int = 9000, log_path: str | None = None) -> int:
+             port: int = 9000, log_path: str | None = None,
+             auth_key: str | None = None) -> int:
     """Serve the gate in front of `upstream` until interrupted."""
     scheme = urllib.parse.urlparse(upstream).scheme
     if scheme not in ("http", "https"):
         raise ValueError(f"upstream must be http/https, got {scheme!r}")
     trace = Trace(log_path)
     gate = Gate(policy, trace)
-    httpd = ThreadingHTTPServer((host, port), make_handler(upstream, gate, trace))
-    trace.emit("gate_http_start", upstream=upstream, listen=f"{host}:{port}")
+    httpd = ThreadingHTTPServer((host, port), make_handler(upstream, gate, trace, auth_key))
+    trace.emit("gate_http_start", upstream=upstream, listen=f"{host}:{port}", auth=bool(auth_key))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

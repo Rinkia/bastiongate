@@ -144,6 +144,48 @@ def test_upstream_redirect_is_not_followed(tmp_path):
     up.shutdown()
 
 
+@pytest.fixture
+def authed_gate(tmp_path):
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), http_echo_server.Handler)
+    _serve(upstream)
+    gate = Gate(GatePolicy(), Trace(None))
+    handler = make_handler(f"http://127.0.0.1:{upstream.server_address[1]}/mcp", gate, Trace(None), auth_key="s3cret")
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    _serve(proxy)
+    time.sleep(0.05)
+    yield f"http://127.0.0.1:{proxy.server_address[1]}/mcp"
+    proxy.shutdown()
+    upstream.shutdown()
+
+
+def _post_raw(url, obj, headers):
+    import urllib.error
+    req = urllib.request.Request(url, data=json.dumps(obj).encode(), method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+
+def test_auth_rejects_without_key(authed_gate):
+    status, _ = _post_raw(authed_gate, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                          {"Content-Type": "application/json"})
+    assert status == 401
+
+
+def test_auth_accepts_with_key(authed_gate):
+    status, body = _post_raw(authed_gate, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                            {"Content-Type": "application/json", "X-Bastiongate-Key": "s3cret"})
+    assert status == 200 and "result" in body
+
+
+def test_auth_rejects_wrong_key(authed_gate):
+    status, _ = _post_raw(authed_gate, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                          {"Content-Type": "application/json", "X-Bastiongate-Key": "wrong"})
+    assert status == 401
+
+
 def test_http_clean_call_roundtrips(gate_over_http):
     resp = _post(gate_over_http, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                                   "params": {"name": "echo", "arguments": {"text": "hi"}}})

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bastiongateway"
-version = "0.2.0"
+version = "0.3.0"
 description = "MCP security gateway: an inline proxy that scans tools/list for poisoned tools, enforces a tool allow/deny policy, blocks injected tool results, and logs every call. The runtime-enforcement leg of the bastion family."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,11 +18,12 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Security",
 ]
-dependencies = ["bastionsupply>=0.1.0"]
+dependencies = ["bastionsupply>=0.1.0", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 agentbastion = ["agentbastion>=0.1.0"]
 agentbastion-judge = ["agentbastion>=0.1.0", "anthropic>=0.40"]
+agentbastion-semantic = ["agentbastion>=0.1.0", "httpx>=0.27"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

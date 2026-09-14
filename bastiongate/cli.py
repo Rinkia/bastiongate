@@ -34,6 +34,8 @@ def main(argv=None) -> int:
     ph.add_argument("--upstream", required=True, help="upstream MCP server URL, e.g. http://127.0.0.1:8000/mcp")
     ph.add_argument("--host", default="127.0.0.1", help="listen host (default 127.0.0.1)")
     ph.add_argument("--port", type=int, default=9000, help="listen port (default 9000)")
+    ph.add_argument("--auth-key", help="require this key in the X-Bastiongate-Key header "
+                                       "(else env BASTIONGATE_PROXY_KEY)")
     ph.add_argument("--policy", help="gate policy YAML/JSON")
     ph.add_argument("--log", help="write a JSONL trace of every call")
     ph.add_argument("--no-scan-tools", action="store_true", help="don't scan tools/list")
@@ -50,10 +52,13 @@ def main(argv=None) -> int:
         return run_stdio(server_argv, policy, args.log)
 
     if args.cmd == "run-http":
+        import os
+
         from .http_proxy import run_http
 
         policy = _apply_flags(load_policy(args.policy) if args.policy else GatePolicy(), args)
-        return run_http(args.upstream, policy, args.host, args.port, args.log)
+        auth_key = args.auth_key or os.environ.get("BASTIONGATE_PROXY_KEY")
+        return run_http(args.upstream, policy, args.host, args.port, args.log, auth_key)
 
     return 2
 

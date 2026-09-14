@@ -6,9 +6,10 @@ Loadable from a YAML/JSON dict so the same file bastionsupply `harden` emits
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import yaml
 
 # action taken when a risk is detected
 BLOCK = "block"  # refuse the call / drop the tool
@@ -30,10 +31,21 @@ class GatePolicy:
     scrub_args: bool = True  # scan tool-call arguments for secrets/PII
     on_pii_arg: str = REDACT  # redact | block | warn when args carry PII
 
+    scrub_results: bool = False  # scan tool-call RESULTS for secrets/PII (opt-in)
+    on_pii_result: str = REDACT  # redact | block | warn when a result carries PII
+
     # deep result inspection (see inspectors.py)
     result_inspector: str = "static"  # static | agentbastion
     inspector_fail: str = "closed"  # closed | open  (behavior if inspector errors)
     inspector_judge: bool = False  # agentbastion: also use the Anthropic LLM judge
+    inspector_semantic: bool = False  # agentbastion: also use the semantic detector
+
+    # per-tool knob overrides: {tool_name: {knob: value}}
+    tools: dict = field(default_factory=dict)
+
+    # knobs that a per-tool override may set
+    _OVERRIDABLE = ("scrub_args", "on_pii_arg", "scan_results", "on_injected_result",
+                    "scrub_results", "on_pii_result")
 
     def tool_allowed(self, name: str) -> bool:
         if name in self.deny:
@@ -42,9 +54,19 @@ class GatePolicy:
             return name in self.allow
         return self.default == "allow"
 
+    def opt(self, tool: str, knob: str):
+        """Value of `knob` for `tool` — a per-tool override, else the global."""
+        override = self.tools.get(tool)
+        if override and knob in override:
+            return override[knob]
+        return getattr(self, knob)
+
 
 def load_policy(path: str | Path) -> GatePolicy:
-    obj = json.loads(Path(path).read_text(encoding="utf-8")) if str(path).endswith(".json") else _yaml(path)
+    # YAML is a superset of JSON, so safe_load reads both harden output shapes.
+    obj = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    if not isinstance(obj, dict):
+        raise ValueError("policy file must be a mapping")
     return from_dict(obj)
 
 
@@ -59,37 +81,11 @@ def from_dict(obj: dict) -> GatePolicy:
         on_injected_result=obj.get("on_injected_result", BLOCK),
         scrub_args=obj.get("scrub_args", True),
         on_pii_arg=obj.get("on_pii_arg", REDACT),
+        scrub_results=obj.get("scrub_results", False),
+        on_pii_result=obj.get("on_pii_result", REDACT),
         result_inspector=obj.get("result_inspector", "static"),
         inspector_fail=obj.get("inspector_fail", "closed"),
         inspector_judge=obj.get("inspector_judge", False),
+        inspector_semantic=obj.get("inspector_semantic", False),
+        tools=obj.get("tools", {}) or {},
     )
-
-
-def _yaml(path: str | Path) -> dict:
-    """Tiny YAML reader for the subset bastionsupply harden emits.
-
-    Handles `key: value`, `key:` followed by `  - item` lists, comments, and
-    bare true/false. Avoids a PyYAML dependency for this flat shape.
-    ponytail: swap for PyYAML if policies ever get nested.
-    """
-    out: dict = {}
-    cur_key = None
-    for raw in Path(path).read_text(encoding="utf-8").splitlines():
-        line = raw.split("#", 1)[0].rstrip()
-        if not line.strip():
-            continue
-        if line.lstrip().startswith("- "):
-            item = line.lstrip()[2:].strip().strip('"')
-            if cur_key:
-                out.setdefault(cur_key, []).append(item)
-            continue
-        if ":" in line:
-            key, _, val = line.partition(":")
-            key = key.strip()
-            val = val.strip().strip('"')
-            cur_key = key
-            if val == "":
-                out.setdefault(key, [])
-            else:
-                out[key] = {"true": True, "false": False}.get(val.lower(), val)
-    return out

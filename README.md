@@ -68,9 +68,19 @@ scan_results: true          # scan tool-call results
 on_injected_result: block   # block results carrying injection
 scrub_args: true            # scan tool-call arguments for secrets/PII
 on_pii_arg: redact          # redact | block | warn
+scrub_results: false        # scan tool-call RESULTS for secrets/PII (opt-in)
+on_pii_result: redact       # redact | block | warn
 result_inspector: static    # static | agentbastion  (deeper inspection)
 inspector_fail: closed      # closed | open  (behavior if the inspector errors)
 inspector_judge: false      # agentbastion: also use the Anthropic LLM judge
+inspector_semantic: false   # agentbastion: also use the semantic detector
+
+# per-tool overrides — any of the knobs above, scoped to one tool
+tools:
+  send_email:
+    scrub_args: false       # the recipient email is the point; don't redact it
+  fetch:
+    on_injected_result: warn
 ```
 
 So the pipeline is: **scan the server with bastionsupply → `harden` a policy →
@@ -93,18 +103,22 @@ bastiongate run-http --upstream http://127.0.0.1:8000/mcp --port 9000 --policy p
 ```
 
 Point your client at `http://127.0.0.1:9000/mcp`. JSON and SSE responses are
-both gated. Binds `127.0.0.1` by default.
+both gated. Binds `127.0.0.1` by default. Add `--auth-key KEY` (or env
+`BASTIONGATE_PROXY_KEY`) to require an `X-Bastiongate-Key` header on every
+request; the key is compared in constant time and never forwarded upstream.
 
 ### Deeper result inspection (agentbastion)
 
 `result_inspector: agentbastion` swaps the static signature scan for
-[agentbastion](https://github.com/Rinkia/agentbastion)'s inbound Firewall
-(heuristics by default; the Anthropic LLM judge with `inspector_judge: true`
-and `ANTHROPIC_API_KEY` set). Requires the extra:
+[agentbastion](https://github.com/Rinkia/agentbastion)'s inbound Firewall,
+composed of up to three tiers: heuristics (always), the semantic detector
+(`inspector_semantic: true` + `BASTIONGATE_EMBED_URL`), and the Anthropic LLM
+judge (`inspector_judge: true` + `ANTHROPIC_API_KEY`).
 
 ```bash
-pip install "bastiongateway[agentbastion]"          # heuristic
-pip install "bastiongateway[agentbastion-judge]"    # + LLM judge
+pip install "bastiongateway[agentbastion]"           # heuristic
+pip install "bastiongateway[agentbastion-semantic]"  # + semantic detector
+pip install "bastiongateway[agentbastion-judge]"     # + LLM judge
 ```
 
 ## Try it
@@ -132,9 +146,11 @@ out = gate.handle_server_msg(response)          # server -> agent
 
 - **Argument redaction can alter legitimate calls.** `on_pii_arg: redact`
   rewrites anything that looks like PII — including a recipient email a
-  `send_email` tool actually needs. For tools that legitimately take such
-  values, set `on_pii_arg: warn` or `scrub_args: false`. Scrubbing is
-  best-effort DLP: base64-encoded or field-split secrets can slip through.
+  `send_email` tool actually needs. Scope it with a per-tool `scrub_args: false`
+  or `on_pii_arg: warn` (see `tools:` above). Scrubbing is best-effort DLP:
+  base64-encoded or field-split secrets can slip through.
+- **Result scrub covers `text` content blocks only** — secrets inside a result's
+  `structuredContent` are not redacted yet.
 - **The HTTP proxy adds no auth of its own.** It binds `127.0.0.1` by default
   and passes the client's `Authorization` header through to the upstream. Do
   not bind a public interface without an auth layer in front.

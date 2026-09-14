@@ -20,19 +20,26 @@ from .trace import Trace
 BLOCK_TOOL_CODE = -32001
 BLOCK_RESULT_CODE = -32002
 BLOCK_ARG_CODE = -32003
+BLOCK_RESULT_PII_CODE = -32004
+
+MAX_PENDING = 10000  # cap in-flight correlation entries (bounds memory)
 
 
 class Gate:
     def __init__(self, policy: GatePolicy, trace: Trace | None = None) -> None:
         self.policy = policy
         self.trace = trace or Trace(None)
-        self._pending: dict = {}  # request id -> (method, tool_name)
+        self._pending: dict = {}  # (session, request id) -> (method, tool_name)
         self._lock = threading.Lock()
         self._inspect = make_inspector(policy)  # tool-result inspector
 
     # --- agent -> server -----------------------------------------------------
-    def handle_client_msg(self, msg: dict) -> tuple[dict | None, dict | None]:
-        """Return (forward_to_server, reply_to_client). Exactly one is usually set."""
+    def handle_client_msg(self, msg: dict, session=None) -> tuple[dict | None, dict | None]:
+        """Return (forward_to_server, reply_to_client). Exactly one is usually set.
+
+        `session` scopes request/response correlation so one Gate serving many
+        HTTP sessions cannot cross-correlate on a reused JSON-RPC id.
+        """
         if not jsonrpc.is_request(msg):
             return msg, None
         method = jsonrpc.method_of(msg)
@@ -42,14 +49,14 @@ class Gate:
             if not decision.allowed:
                 self.trace.emit("tool_call_blocked", id=msg.get("id"), tool=name, reason=decision.reason)
                 return None, jsonrpc.error_response(msg.get("id"), BLOCK_TOOL_CODE, decision.reason)
-            if self.policy.scrub_args:
+            if self.policy.opt(name, "scrub_args"):
                 msg, reply = self._scrub_args(msg, name)
                 if reply is not None:
                     return None, reply
-            self._remember(msg.get("id"), "tools/call", name)
+            self._remember(session, msg.get("id"), "tools/call", name)
             self.trace.emit("tool_call", id=msg.get("id"), tool=name)
         elif method == "tools/list":
-            self._remember(msg.get("id"), "tools/list", None)
+            self._remember(session, msg.get("id"), "tools/list", None)
         return msg, None
 
     def _scrub_args(self, msg: dict, name: str) -> tuple[dict | None, dict | None]:
@@ -62,7 +69,7 @@ class Gate:
         if not hits:
             return msg, None
         kinds = sorted(set(hits))
-        mode = self.policy.on_pii_arg
+        mode = self.policy.opt(name, "on_pii_arg")
         if mode == BLOCK:
             self.trace.emit("arg_pii_blocked", id=msg.get("id"), tool=name, kinds=kinds, count=len(hits))
             return None, jsonrpc.error_response(
@@ -81,16 +88,23 @@ class Gate:
         return new_msg, None
 
     # --- server -> agent -----------------------------------------------------
-    def handle_server_msg(self, msg: dict) -> dict | None:
+    def handle_server_msg(self, msg: dict, session=None) -> dict | None:
         """Return the (possibly replaced/filtered) message to forward to the agent."""
         if not jsonrpc.is_response(msg):
             return msg
-        method, tool = self._recall(msg.get("id"))
+        method, tool = self._recall(session, msg.get("id"))
 
         if method == "tools/list" and self.policy.scan_tools:
             return self._filter_tools(msg)
-        if method == "tools/call" and self.policy.scan_results:
-            return self._scan_result(msg, tool)
+        if method == "tools/call":
+            out = msg
+            if self.policy.opt(tool or "", "scan_results"):
+                out = self._scan_result(out, tool)
+                if "error" in out:  # injection blocked; nothing left to scrub
+                    return out
+            if self.policy.opt(tool or "", "scrub_results"):
+                out = self._scrub_result(out, tool)
+            return out
         return msg
 
     # --- helpers -------------------------------------------------------------
@@ -118,7 +132,7 @@ class Gate:
         if decision.allowed:
             return msg
         self.trace.emit("result_blocked", id=msg.get("id"), tool=tool, reason=decision.reason)
-        if self.policy.on_injected_result != BLOCK:
+        if self.policy.opt(tool or "", "on_injected_result") != BLOCK:
             return msg
         return jsonrpc.error_response(
             msg.get("id"),
@@ -126,13 +140,50 @@ class Gate:
             f"bastiongate blocked tool result: {decision.reason}",
         )
 
-    def _remember(self, mid, method, tool) -> None:
-        with self._lock:
-            self._pending[mid] = (method, tool)
+    def _scrub_result(self, msg: dict, tool: str | None) -> dict:
+        """Redact/block secrets a tool RETURNS, in the result's text blocks."""
+        result = msg.get("result")
+        if not isinstance(result, dict):
+            return msg
+        blocks = result.get("content")
+        if not isinstance(blocks, list):
+            return msg
+        kinds: list[str] = []
+        new_blocks = []
+        for b in blocks:
+            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                red, found = pii.scrub_text(b["text"])
+                if found:
+                    kinds.extend(found)
+                    b = {**b, "text": red}
+            new_blocks.append(b)
+        if not kinds:
+            return msg
+        uniq = sorted(set(kinds))
+        mode = self.policy.opt(tool or "", "on_pii_result")
+        if mode == BLOCK:
+            self.trace.emit("result_pii_blocked", id=msg.get("id"), tool=tool, kinds=uniq, count=len(kinds))
+            return jsonrpc.error_response(
+                msg.get("id"), BLOCK_RESULT_PII_CODE,
+                f"bastiongate blocked tool result: it carries secret/PII ({', '.join(uniq)})",
+            )
+        if mode == WARN:
+            self.trace.emit("result_pii_detected", id=msg.get("id"), tool=tool, kinds=uniq, count=len(kinds))
+            return msg
+        self.trace.emit("result_pii_redacted", id=msg.get("id"), tool=tool, kinds=uniq, count=len(kinds))
+        new_result = {**result, "content": new_blocks}
+        return {**msg, "result": new_result}
 
-    def _recall(self, mid) -> tuple[str | None, str | None]:
+    def _remember(self, session, mid, method, tool) -> None:
         with self._lock:
-            return self._pending.pop(mid, (None, None))
+            if len(self._pending) >= MAX_PENDING:
+                # evict oldest (orphaned request whose response never came)
+                self._pending.pop(next(iter(self._pending)))
+            self._pending[(session, mid)] = (method, tool)
+
+    def _recall(self, session, mid) -> tuple[str | None, str | None]:
+        with self._lock:
+            return self._pending.pop((session, mid), (None, None))
 
 
 def run_stdio(server_argv: list[str], policy: GatePolicy, log_path: str | None = None) -> int:
