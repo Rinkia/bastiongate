@@ -117,9 +117,17 @@ judge (`inspector_judge: true` + `ANTHROPIC_API_KEY`).
 
 ```bash
 pip install "bastiongateway[agentbastion]"           # heuristic
-pip install "bastiongateway[agentbastion-semantic]"  # + semantic detector
+pip install "bastiongateway[agentbastion-local]"     # + semantic (local model, no egress)
+pip install "bastiongateway[agentbastion-semantic]"  # + semantic (remote embed endpoint)
 pip install "bastiongateway[agentbastion-judge]"     # + LLM judge
 ```
+
+The semantic detector needs an embedder, chosen by env:
+
+- `BASTIONGATE_EMBED_MODEL` — a local sentence-transformers model (e.g.
+  `all-MiniLM-L6-v2`). Result text never leaves the process. **Preferred.**
+- `BASTIONGATE_EMBED_URL` — a self-hosted embeddings endpoint (result text is
+  POSTed to it).
 
 ## Try it
 

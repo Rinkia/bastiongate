@@ -67,16 +67,49 @@ def _semantic_detector():
 
 
 def _make_embedder():
-    """Embedder for the semantic detector — a self-hosted embeddings endpoint."""
-    url = os.environ.get("BASTIONGATE_EMBED_URL")
-    if not url:
-        raise RuntimeError(
-            "inspector_semantic=true needs an embeddings endpoint in BASTIONGATE_EMBED_URL "
-            '(and httpx: pip install "bastiongateway[agentbastion-semantic]")'
-        )
-    from agentbastion.semantic import http_embedder
+    """Embedder for the semantic detector.
 
-    return http_embedder(url)
+    Two backends, in priority order:
+      - BASTIONGATE_EMBED_MODEL: a local sentence-transformers model — result
+        text never leaves the process (no egress).
+      - BASTIONGATE_EMBED_URL: a self-hosted embeddings endpoint (result text is
+        POSTed to it).
+    """
+    model_name = os.environ.get("BASTIONGATE_EMBED_MODEL")
+    if model_name:
+        return _local_embedder(model_name)
+    url = os.environ.get("BASTIONGATE_EMBED_URL")
+    if url:
+        from agentbastion.semantic import http_embedder
+
+        return http_embedder(url)
+    raise RuntimeError(
+        "inspector_semantic=true needs an embedder: set BASTIONGATE_EMBED_MODEL "
+        '(local: pip install "bastiongateway[agentbastion-local]") or '
+        'BASTIONGATE_EMBED_URL (remote: pip install "bastiongateway[agentbastion-semantic]")'
+    )
+
+
+def _local_embedder(model_name: str):
+    """A local, in-process embedder — no network, no result-text egress."""
+    model = _load_st_model(model_name)
+
+    def embed(texts):
+        vecs = model.encode(list(texts), normalize_embeddings=True)
+        return vecs.tolist() if hasattr(vecs, "tolist") else [list(v) for v in vecs]
+
+    return embed
+
+
+def _load_st_model(model_name: str):
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as e:
+        raise RuntimeError(
+            'BASTIONGATE_EMBED_MODEL needs sentence-transformers: '
+            'pip install "bastiongateway[agentbastion-local]"'
+        ) from e
+    return SentenceTransformer(model_name)
 
 
 def _judge():

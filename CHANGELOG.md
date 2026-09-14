@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+- **Local semantic embedder**: `inspector_semantic` can now use an in-process
+  sentence-transformers model via `BASTIONGATE_EMBED_MODEL` — result text never
+  leaves the process (closes the remote-embedder egress gap). The remote
+  `BASTIONGATE_EMBED_URL` path remains; the local model wins when both are set.
+  Install extra `bastiongateway[agentbastion-local]`.
+
 ## 0.4.0
 
 Hardening pass over the 0.3.0 surface:
