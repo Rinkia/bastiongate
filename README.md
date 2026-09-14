@@ -23,8 +23,11 @@ The runtime-enforcement leg of the **bastion family**:
 ## Install
 
 ```bash
-pip install bastiongate
+pip install bastiongateway
 ```
+
+(The PyPI distribution is `bastiongateway`; the import package and `bastiongate`
+CLI keep that name.)
 
 ## Use
 

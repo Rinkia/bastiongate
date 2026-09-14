@@ -1,9 +1,10 @@
 name: Publish to PyPI
 
 # Publishes on a GitHub Release. Uses PyPI Trusted Publishing (OIDC) - no API
-# token stored. One-time setup on PyPI: create the `bastiongate` project's
+# token stored. One-time setup on PyPI: create the `bastiongateway` project's
 # trusted publisher pointing at this repo + workflow (publish.yml) + environment
 # `pypi`. https://docs.pypi.org/trusted-publishers/
+# (PyPI dist name is `bastiongateway`; import package / CLI stay `bastiongate`.)
 # NOTE: publish the `bastionsupply` dependency to PyPI first, or `pip install
 # bastiongate` cannot resolve it.
 on:
