@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip pytest
+      # bastionsupply dependency: pull from its repo until it's on PyPI, so CI is
+      # green before the first PyPI release. Once it's on PyPI this still works.
+      - run: python -m pip install "bastionsupply @ git+https://github.com/Rinkia/bastionsupply@master"
+      - run: python -m pip install -e . --no-deps
+      - run: pytest -q
