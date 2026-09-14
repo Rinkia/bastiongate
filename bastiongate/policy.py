@@ -13,6 +13,7 @@ from pathlib import Path
 # action taken when a risk is detected
 BLOCK = "block"  # refuse the call / drop the tool
 WARN = "warn"  # log only, let it through
+REDACT = "redact"  # (args only) replace the secret/PII, forward the rest
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,14 @@ class GatePolicy:
     on_poisoned_tool: str = BLOCK  # drop poisoned tools from the listing
     scan_results: bool = True  # scan tool-call results for injection
     on_injected_result: str = BLOCK  # block a result that carries injection
+
+    scrub_args: bool = True  # scan tool-call arguments for secrets/PII
+    on_pii_arg: str = REDACT  # redact | block | warn when args carry PII
+
+    # deep result inspection (see inspectors.py)
+    result_inspector: str = "static"  # static | agentbastion
+    inspector_fail: str = "closed"  # closed | open  (behavior if inspector errors)
+    inspector_judge: bool = False  # agentbastion: also use the Anthropic LLM judge
 
     def tool_allowed(self, name: str) -> bool:
         if name in self.deny:
@@ -48,6 +57,11 @@ def from_dict(obj: dict) -> GatePolicy:
         on_poisoned_tool=obj.get("on_poisoned_tool", BLOCK),
         scan_results=obj.get("scan_results", True),
         on_injected_result=obj.get("on_injected_result", BLOCK),
+        scrub_args=obj.get("scrub_args", True),
+        on_pii_arg=obj.get("on_pii_arg", REDACT),
+        result_inspector=obj.get("result_inspector", "static"),
+        inspector_fail=obj.get("inspector_fail", "closed"),
+        inspector_judge=obj.get("inspector_judge", False),
     )
 
 

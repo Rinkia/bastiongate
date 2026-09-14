@@ -1,0 +1,6 @@
+{"stage": "tool_result", "decision": "block", "detail": "signatures=ignore_previous,ignore_your_rules", "extra": {"matches": ["ignore_previous", "ignore_your_rules"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T09:55:36.618039+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T09:55:36.620676+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=ignore_previous,ignore_your_rules", "extra": {"matches": ["ignore_previous", "ignore_your_rules"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T09:56:56.804748+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T09:56:56.805966+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=ignore_previous,ignore_your_rules", "extra": {"matches": ["ignore_previous", "ignore_your_rules"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T09:58:48.497128+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T09:58:48.498395+00:00"}

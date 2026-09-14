@@ -30,22 +30,40 @@ def main(argv=None) -> int:
     pr.add_argument("server", nargs=argparse.REMAINDER,
                     help="-- then the MCP server command to run")
 
+    ph = sub.add_parser("run-http", help="proxy an MCP Streamable-HTTP server through the gate")
+    ph.add_argument("--upstream", required=True, help="upstream MCP server URL, e.g. http://127.0.0.1:8000/mcp")
+    ph.add_argument("--host", default="127.0.0.1", help="listen host (default 127.0.0.1)")
+    ph.add_argument("--port", type=int, default=9000, help="listen port (default 9000)")
+    ph.add_argument("--policy", help="gate policy YAML/JSON")
+    ph.add_argument("--log", help="write a JSONL trace of every call")
+    ph.add_argument("--no-scan-tools", action="store_true", help="don't scan tools/list")
+    ph.add_argument("--no-scan-results", action="store_true", help="don't scan tool results")
+
     args = ap.parse_args(argv)
-    if args.cmd != "run":
-        return 2
 
-    server_argv = _strip_dashes(args.server)
-    if not server_argv:
-        print("bastiongate: give a server command after --", file=sys.stderr)
-        return 2
+    if args.cmd == "run":
+        server_argv = _strip_dashes(args.server)
+        if not server_argv:
+            print("bastiongate: give a server command after --", file=sys.stderr)
+            return 2
+        policy = _apply_flags(load_policy(args.policy) if args.policy else GatePolicy(), args)
+        return run_stdio(server_argv, policy, args.log)
 
-    policy = load_policy(args.policy) if args.policy else GatePolicy()
-    if args.no_scan_tools:
+    if args.cmd == "run-http":
+        from .http_proxy import run_http
+
+        policy = _apply_flags(load_policy(args.policy) if args.policy else GatePolicy(), args)
+        return run_http(args.upstream, policy, args.host, args.port, args.log)
+
+    return 2
+
+
+def _apply_flags(policy: GatePolicy, args) -> GatePolicy:
+    if getattr(args, "no_scan_tools", False):
         policy = _replace(policy, scan_tools=False)
-    if args.no_scan_results:
+    if getattr(args, "no_scan_results", False):
         policy = _replace(policy, scan_results=False)
-
-    return run_stdio(server_argv, policy, args.log)
+    return policy
 
 
 def _strip_dashes(rest: list[str]) -> list[str]:

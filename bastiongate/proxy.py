@@ -12,12 +12,14 @@ import subprocess
 import sys
 import threading
 
-from . import guards, jsonrpc
-from .policy import BLOCK, GatePolicy
+from . import guards, jsonrpc, pii
+from .inspectors import make_inspector
+from .policy import BLOCK, REDACT, WARN, GatePolicy
 from .trace import Trace
 
 BLOCK_TOOL_CODE = -32001
 BLOCK_RESULT_CODE = -32002
+BLOCK_ARG_CODE = -32003
 
 
 class Gate:
@@ -26,23 +28,57 @@ class Gate:
         self.trace = trace or Trace(None)
         self._pending: dict = {}  # request id -> (method, tool_name)
         self._lock = threading.Lock()
+        self._inspect = make_inspector(policy)  # tool-result inspector
 
     # --- agent -> server -----------------------------------------------------
     def handle_client_msg(self, msg: dict) -> tuple[dict | None, dict | None]:
         """Return (forward_to_server, reply_to_client). Exactly one is usually set."""
-        if jsonrpc.is_request(msg):
-            method = jsonrpc.method_of(msg)
-            if method == "tools/call":
-                name = (msg.get("params") or {}).get("name", "")
-                decision = guards.check_tool_call(name, self.policy)
-                if not decision.allowed:
-                    self.trace.emit("tool_call_blocked", id=msg.get("id"), tool=name, reason=decision.reason)
-                    return None, jsonrpc.error_response(msg.get("id"), BLOCK_TOOL_CODE, decision.reason)
-                self._remember(msg.get("id"), "tools/call", name)
-                self.trace.emit("tool_call", id=msg.get("id"), tool=name)
-            elif method == "tools/list":
-                self._remember(msg.get("id"), "tools/list", None)
+        if not jsonrpc.is_request(msg):
+            return msg, None
+        method = jsonrpc.method_of(msg)
+        if method == "tools/call":
+            name = (msg.get("params") or {}).get("name", "")
+            decision = guards.check_tool_call(name, self.policy)
+            if not decision.allowed:
+                self.trace.emit("tool_call_blocked", id=msg.get("id"), tool=name, reason=decision.reason)
+                return None, jsonrpc.error_response(msg.get("id"), BLOCK_TOOL_CODE, decision.reason)
+            if self.policy.scrub_args:
+                msg, reply = self._scrub_args(msg, name)
+                if reply is not None:
+                    return None, reply
+            self._remember(msg.get("id"), "tools/call", name)
+            self.trace.emit("tool_call", id=msg.get("id"), tool=name)
+        elif method == "tools/list":
+            self._remember(msg.get("id"), "tools/list", None)
         return msg, None
+
+    def _scrub_args(self, msg: dict, name: str) -> tuple[dict | None, dict | None]:
+        """Redact/block secrets in tool-call arguments. Only kinds are logged."""
+        params = msg.get("params") or {}
+        args = params.get("arguments")
+        if args is None:
+            return msg, None
+        new_args, hits = pii.scrub(args)
+        if not hits:
+            return msg, None
+        kinds = sorted(set(hits))
+        mode = self.policy.on_pii_arg
+        if mode == BLOCK:
+            self.trace.emit("arg_pii_blocked", id=msg.get("id"), tool=name, kinds=kinds, count=len(hits))
+            return None, jsonrpc.error_response(
+                msg.get("id"), BLOCK_ARG_CODE,
+                f"bastiongate blocked tool call: arguments carry secret/PII ({', '.join(kinds)})",
+            )
+        if mode == WARN:
+            self.trace.emit("arg_pii_detected", id=msg.get("id"), tool=name, kinds=kinds, count=len(hits))
+            return msg, None
+        # REDACT (default): forward a copy with values replaced
+        self.trace.emit("arg_pii_redacted", id=msg.get("id"), tool=name, kinds=kinds, count=len(hits))
+        new_msg = dict(msg)
+        new_params = dict(params)
+        new_params["arguments"] = new_args
+        new_msg["params"] = new_params
+        return new_msg, None
 
     # --- server -> agent -----------------------------------------------------
     def handle_server_msg(self, msg: dict) -> dict | None:
@@ -78,7 +114,7 @@ class Gate:
 
     def _scan_result(self, msg: dict, tool: str | None) -> dict:
         text = jsonrpc.result_text(msg)
-        decision = guards.scan_result_text(text)
+        decision = self._inspect(text)
         if decision.allowed:
             return msg
         self.trace.emit("result_blocked", id=msg.get("id"), tool=tool, reason=decision.reason)

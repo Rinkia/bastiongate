@@ -19,5 +19,14 @@ from __future__ import annotations
 from .policy import GatePolicy, from_dict, load_policy
 from .proxy import Gate, run_stdio
 
-__version__ = "0.1.0"
-__all__ = ["Gate", "GatePolicy", "load_policy", "from_dict", "run_stdio", "__version__"]
+__version__ = "0.2.0"
+
+
+def run_http(*args, **kwargs):
+    """Lazy re-export of http_proxy.run_http (keeps import light)."""
+    from .http_proxy import run_http as _run_http
+
+    return _run_http(*args, **kwargs)
+
+
+__all__ = ["Gate", "GatePolicy", "load_policy", "from_dict", "run_stdio", "run_http", "__version__"]
