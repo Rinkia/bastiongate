@@ -92,3 +92,23 @@
 {"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T13:03:26.067293+00:00"}
 {"stage": "tool_result", "decision": "block", "detail": "signatures=ignore_previous,ignore_your_rules", "extra": {"matches": ["ignore_previous", "ignore_your_rules"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T13:03:26.072163+00:00"}
 {"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T13:03:26.073720+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=ignore_previous,ignore_your_rules", "extra": {"matches": ["ignore_previous", "ignore_your_rules"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.567191+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.568527+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.684088+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.686875+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.687446+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.690955+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.691580+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.693189+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=ignore_previous,ignore_your_rules", "extra": {"matches": ["ignore_previous", "ignore_your_rules"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.694891+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:11:02.695222+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=ignore_previous,ignore_your_rules", "extra": {"matches": ["ignore_previous", "ignore_your_rules"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.839852+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.841061+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.899364+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.903213+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.903828+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.907068+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.907605+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=semantic", "extra": {"matches": ["semantic"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.909358+00:00"}
+{"stage": "tool_result", "decision": "block", "detail": "signatures=ignore_previous,ignore_your_rules", "extra": {"matches": ["ignore_previous", "ignore_your_rules"], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.911354+00:00"}
+{"stage": "tool_result", "decision": "allow", "detail": "clean", "extra": {"matches": [], "judge_flagged": false, "tenant": null}, "ts": "2026-09-14T14:12:48.911707+00:00"}

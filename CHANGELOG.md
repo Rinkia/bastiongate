@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0
+
+- The tools/list filter now drops tools flagged `homoglyph-name` by bastionsupply
+  (a look-alike tool name impersonating another), alongside `tool-poisoning` and
+  `hidden-unicode`. Requires bastionsupply >= 0.3.1.
+
 ## 0.6.0
 
 - **structuredContent injection scan**: the result injection check now reads

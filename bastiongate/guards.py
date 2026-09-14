@@ -15,7 +15,8 @@ from bastionsupply.scanner import scan
 
 from .policy import BLOCK, GatePolicy
 
-_ACTIVE_CHECKS = {"tool-poisoning", "hidden-unicode"}  # attacks in free text
+# findings that mean a tool's own definition is an attack -> drop it from the listing
+_ACTIVE_CHECKS = {"tool-poisoning", "hidden-unicode", "homoglyph-name"}
 
 
 @dataclass(frozen=True)
