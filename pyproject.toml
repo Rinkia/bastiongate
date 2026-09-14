@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bastiongateway"
-version = "0.3.0"
+version = "0.4.0"
 description = "MCP security gateway: an inline proxy that scans tools/list for poisoned tools, enforces a tool allow/deny policy, blocks injected tool results, and logs every call. The runtime-enforcement leg of the bastion family."
 readme = "README.md"
 requires-python = ">=3.10"

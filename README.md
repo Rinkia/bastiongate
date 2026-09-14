@@ -149,8 +149,9 @@ out = gate.handle_server_msg(response)          # server -> agent
   `send_email` tool actually needs. Scope it with a per-tool `scrub_args: false`
   or `on_pii_arg: warn` (see `tools:` above). Scrubbing is best-effort DLP:
   base64-encoded or field-split secrets can slip through.
-- **Result scrub covers `text` content blocks only** — secrets inside a result's
-  `structuredContent` are not redacted yet.
+- Result scrub covers both `text` content blocks and `structuredContent`.
+- The HTTP listener throttles an IP after repeated auth failures (`429`), and
+  correlation state is bounded per session with an idle TTL.
 - **The HTTP proxy adds no auth of its own.** It binds `127.0.0.1` by default
   and passes the client's `Authorization` header through to the upstream. Do
   not bind a public interface without an auth layer in front.

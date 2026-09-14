@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0
+
+Hardening pass over the 0.3.0 surface:
+
+- **Result scrub now covers `structuredContent`** (JSON results), not just text
+  blocks — both directions of PII scrub are now structure-aware.
+- **Per-session correlation caps + idle TTL**: pending entries are bounded per
+  session (not globally), so one busy/abusive session can't evict another's;
+  orphaned entries expire; a session-count backstop bounds forged-id floods.
+- **HTTP auth rate-limiting**: an IP is throttled with `429` after repeated
+  failed `X-Bastiongate-Key` attempts.
+- **Judge verdict cache**: the agentbastion judge path now uses a `TTLCache`
+  (`BASTIONGATE_JUDGE_CACHE_TTL` / `_SIZE`) so repeat results skip the round-trip.
+
 ## 0.3.0
 
 - **Per-tool policy overrides** (`tools:` map): scope `scrub_args`, `on_pii_arg`,

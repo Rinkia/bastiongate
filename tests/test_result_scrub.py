@@ -42,6 +42,32 @@ def test_injection_block_precedes_scrub():
     assert "error" in out and out["error"]["code"] == -32002
 
 
+def test_result_scrub_covers_structured_content():
+    gate = Gate(GatePolicy(scrub_results=True))
+    gate.handle_client_msg(_call(8, "fetch"))
+    msg = {"jsonrpc": "2.0", "id": 8, "result": {
+        "content": [{"type": "text", "text": "see attached"}],
+        "structuredContent": {"user": {"email": "a@b.com"}, "key": "AKIAIOSFODNN7EXAMPLE"},
+    }}
+    out = gate.handle_server_msg(msg)
+    sc = out["result"]["structuredContent"]
+    assert "a@b.com" not in json_dumps(sc)
+    assert "AKIAIOSFODNN7EXAMPLE" not in json_dumps(sc)
+
+
+def test_result_scrub_structured_only_no_content():
+    gate = Gate(GatePolicy(scrub_results=True))
+    gate.handle_client_msg(_call(9, "fetch"))
+    msg = {"jsonrpc": "2.0", "id": 9, "result": {"structuredContent": {"token": "sk-abcdef0123456789ABCDEFGHIJ"}}}
+    out = gate.handle_server_msg(msg)
+    assert "sk-abcdef0123456789ABCDEFGHIJ" not in json_dumps(out["result"]["structuredContent"])
+
+
+def json_dumps(o):
+    import json
+    return json.dumps(o)
+
+
 def test_per_tool_result_scrub():
     gate = Gate(GatePolicy(tools={"leaky": {"scrub_results": True}}))
     gate.handle_client_msg(_call(5, "leaky"))

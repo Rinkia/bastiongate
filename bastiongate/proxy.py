@@ -11,6 +11,8 @@ import os
 import subprocess
 import sys
 import threading
+import time
+from collections import deque
 
 from . import guards, jsonrpc, pii
 from .inspectors import make_inspector
@@ -22,14 +24,19 @@ BLOCK_RESULT_CODE = -32002
 BLOCK_ARG_CODE = -32003
 BLOCK_RESULT_PII_CODE = -32004
 
-MAX_PENDING = 10000  # cap in-flight correlation entries (bounds memory)
+# in-flight correlation bounds (per session, so one busy/abusive session can't
+# evict another's entries)
+MAX_PENDING_PER_SESSION = 1000
+PENDING_TTL_SECONDS = 300  # reclaim entries whose response never came
+MAX_SESSIONS = 10000  # backstop: bound distinct tracked sessions (forged-id flood)
 
 
 class Gate:
     def __init__(self, policy: GatePolicy, trace: Trace | None = None) -> None:
         self.policy = policy
         self.trace = trace or Trace(None)
-        self._pending: dict = {}  # (session, request id) -> (method, tool_name)
+        self._pending: dict = {}  # (session, id) -> (method, tool, ts)
+        self._order: dict = {}  # session -> deque of keys (oldest first)
         self._lock = threading.Lock()
         self._inspect = make_inspector(policy)  # tool-result inspector
 
@@ -141,22 +148,33 @@ class Gate:
         )
 
     def _scrub_result(self, msg: dict, tool: str | None) -> dict:
-        """Redact/block secrets a tool RETURNS, in the result's text blocks."""
+        """Redact/block secrets a tool RETURNS — in text content blocks AND in
+        the result's structuredContent."""
         result = msg.get("result")
         if not isinstance(result, dict):
             return msg
-        blocks = result.get("content")
-        if not isinstance(blocks, list):
-            return msg
         kinds: list[str] = []
-        new_blocks = []
-        for b in blocks:
-            if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
-                red, found = pii.scrub_text(b["text"])
-                if found:
-                    kinds.extend(found)
-                    b = {**b, "text": red}
-            new_blocks.append(b)
+        new_result = dict(result)
+
+        blocks = result.get("content")
+        if isinstance(blocks, list):
+            new_blocks = []
+            for b in blocks:
+                if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
+                    red, found = pii.scrub_text(b["text"])
+                    if found:
+                        kinds.extend(found)
+                        b = {**b, "text": red}
+                new_blocks.append(b)
+            new_result["content"] = new_blocks
+
+        structured = result.get("structuredContent")
+        if structured is not None:
+            new_structured, found = pii.scrub(structured)
+            if found:
+                kinds.extend(found)
+                new_result["structuredContent"] = new_structured
+
         if not kinds:
             return msg
         uniq = sorted(set(kinds))
@@ -171,19 +189,39 @@ class Gate:
             self.trace.emit("result_pii_detected", id=msg.get("id"), tool=tool, kinds=uniq, count=len(kinds))
             return msg
         self.trace.emit("result_pii_redacted", id=msg.get("id"), tool=tool, kinds=uniq, count=len(kinds))
-        new_result = {**result, "content": new_blocks}
         return {**msg, "result": new_result}
 
     def _remember(self, session, mid, method, tool) -> None:
+        now = time.monotonic()
+        key = (session, mid)
         with self._lock:
-            if len(self._pending) >= MAX_PENDING:
-                # evict oldest (orphaned request whose response never came)
-                self._pending.pop(next(iter(self._pending)))
-            self._pending[(session, mid)] = (method, tool)
+            if session not in self._order and len(self._order) >= MAX_SESSIONS:
+                # evict the oldest-tracked other session wholesale
+                for s in list(self._order):
+                    if s != session:
+                        for k in self._order.pop(s):
+                            self._pending.pop(k, None)
+                        break
+            dq = self._order.setdefault(session, deque())
+            # reclaim this session's expired entries (oldest-first, cheap)
+            while dq and self._pending.get(dq[0], (None, None, 0.0))[2] < now - PENDING_TTL_SECONDS:
+                self._pending.pop(dq.popleft(), None)
+            # enforce this session's cap (evict only this session's oldest)
+            while len(dq) >= MAX_PENDING_PER_SESSION:
+                self._pending.pop(dq.popleft(), None)
+            self._pending[key] = (method, tool, now)
+            dq.append(key)
 
     def _recall(self, session, mid) -> tuple[str | None, str | None]:
+        key = (session, mid)
         with self._lock:
-            return self._pending.pop((session, mid), (None, None))
+            entry = self._pending.pop(key, None)
+            dq = self._order.get(session)
+            if dq is not None and not dq:
+                self._order.pop(session, None)
+            if entry is None:
+                return (None, None)
+            return (entry[0], entry[1])
 
 
 def run_stdio(server_argv: list[str], policy: GatePolicy, log_path: str | None = None) -> int:

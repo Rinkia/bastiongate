@@ -34,7 +34,9 @@ def build_inspector(policy: GatePolicy):
     judge = _judge() if policy.inspector_judge else None
 
     if detectors or judge:
-        firewall = Firewall(inbound=InboundGuard(judge=judge, detectors=detectors))
+        # a verdict cache spares repeat results the judge/semantic round-trip
+        cache = _cache() if judge else None
+        firewall = Firewall(inbound=InboundGuard(judge=judge, detectors=detectors, cache=cache))
     else:
         firewall = Firewall()  # heuristic only
 
@@ -47,6 +49,14 @@ def build_inspector(policy: GatePolicy):
         return Decision(False, f"agentbastion blocked: {verdict.reason}", tuple(verdict.matches))
 
     return inspect
+
+
+def _cache():
+    from agentbastion.cache import TTLCache
+
+    ttl = int(os.environ.get("BASTIONGATE_JUDGE_CACHE_TTL", "300"))
+    size = int(os.environ.get("BASTIONGATE_JUDGE_CACHE_SIZE", "1024"))
+    return TTLCache(maxsize=size, ttl_s=ttl)
 
 
 def _semantic_detector():

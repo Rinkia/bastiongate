@@ -20,9 +20,12 @@ from __future__ import annotations
 
 import hmac
 import json
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import jsonrpc
@@ -55,9 +58,27 @@ _FWD_RESP_HEADERS = {"mcp-session-id", "mcp-protocol-version"}
 
 
 AUTH_HEADER = "X-Bastiongate-Key"
+AUTH_MAX_FAILS = 10  # failed auths per IP per window before throttling
+AUTH_WINDOW = 60.0  # seconds
 
 
 def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None = None):
+    fails: dict[str, deque] = {}  # client ip -> recent failure timestamps
+    fails_lock = threading.Lock()
+
+    def _throttled(ip: str) -> bool:
+        """True if this IP has too many recent auth failures."""
+        now = time.monotonic()
+        with fails_lock:
+            dq = fails.setdefault(ip, deque())
+            while dq and dq[0] < now - AUTH_WINDOW:
+                dq.popleft()
+            return len(dq) >= AUTH_MAX_FAILS
+
+    def _record_fail(ip: str) -> None:
+        with fails_lock:
+            fails.setdefault(ip, deque()).append(time.monotonic())
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -67,20 +88,30 @@ def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None =
         def _authed(self) -> bool:
             if not auth_key:
                 return True
+            ip = self.client_address[0]
+            if _throttled(ip):
+                self._drain_body()
+                trace.emit("http_auth_throttled", ip=ip)
+                self._simple(429, "too many failed auth attempts")
+                return False
             given = self.headers.get(AUTH_HEADER, "")
             if hmac.compare_digest(given, auth_key):
-                return True
-            # drain the request body so closing the socket doesn't reset the
-            # client before it reads the 401
+                return True  # success: leave the body for do_POST to read
+            _record_fail(ip)
+            self._drain_body()
+            trace.emit("http_auth_rejected", path=self.path)
+            self._simple(401, "missing or invalid " + AUTH_HEADER)
+            return False
+
+        def _drain_body(self):
+            # read any request body so closing the socket on a rejection doesn't
+            # reset the client before it reads the response
             length = int(self.headers.get("Content-Length") or 0)
             if 0 < length <= MAX_BODY:
                 try:
                     self.rfile.read(length)
                 except OSError:
                     pass
-            trace.emit("http_auth_rejected", path=self.path)
-            self._simple(401, "missing or invalid " + AUTH_HEADER)
-            return False
 
         # --- agent -> server ---------------------------------------------------
         def do_POST(self):

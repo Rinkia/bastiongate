@@ -186,6 +186,16 @@ def test_auth_rejects_wrong_key(authed_gate):
     assert status == 401
 
 
+def test_auth_throttles_after_repeated_failures(authed_gate):
+    from bastiongate.http_proxy import AUTH_MAX_FAILS
+
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    hdr = {"Content-Type": "application/json", "X-Bastiongate-Key": "wrong"}
+    codes = [_post_raw(authed_gate, body, hdr)[0] for _ in range(AUTH_MAX_FAILS + 2)]
+    assert codes[0] == 401
+    assert 429 in codes  # throttled once the window fills
+
+
 def test_http_clean_call_roundtrips(gate_over_http):
     resp = _post(gate_over_http, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                                   "params": {"name": "echo", "arguments": {"text": "hi"}}})
