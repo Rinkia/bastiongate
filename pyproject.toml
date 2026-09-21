@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Security",
 ]
-dependencies = ["bastionsupply>=0.3.1", "pyyaml>=6.0"]
+dependencies = ["bastionsupply>=0.5.0", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 agentbastion = ["agentbastion>=0.1.0"]
