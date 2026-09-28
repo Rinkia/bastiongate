@@ -16,10 +16,10 @@ attack (bastionprobe), investigate (bastiontrace), scan (bastionsupply),
 
 from __future__ import annotations
 
-from .policy import GatePolicy, from_dict, load_policy
+from .policy import GatePolicy, PolicyError, from_dict, load_policy
 from .proxy import Gate, run_stdio
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 
 def run_http(*args, **kwargs):
@@ -29,4 +29,4 @@ def run_http(*args, **kwargs):
     return _run_http(*args, **kwargs)
 
 
-__all__ = ["Gate", "GatePolicy", "load_policy", "from_dict", "run_stdio", "run_http", "__version__"]
+__all__ = ["Gate", "GatePolicy", "PolicyError", "load_policy", "from_dict", "run_stdio", "run_http", "__version__"]

@@ -1,0 +1,26 @@
+# policy_version 2 golden. Kept BYTE-IDENTICAL in agentbastion and bastiongate; each repo's
+# tests/test_policy_v2_contract.py locks how that consumer parses and enforces it.
+# Exercises every part of the v2 format. Change it deliberately; a diff here is a
+# format change that other consumers (bastiongate, A2) and producers (harden) must follow.
+# No gate.* IDs: bastiongate has none (its gate: knobs are the modes) and rejects them.
+policy_version: 2
+
+# Tool policy. `default` is required because allow/deny/rate_limits are present.
+# Precedence: deny-list, then allow-list; `default` applies only when there is no allow list.
+default: deny
+allow: [get_order_status, search_faq, send_receipt]
+deny: [issue_refund]
+rate_limits: {send_receipt: 3}
+
+detectors:
+  bastion.exfil_action: off          # kill switch (unquoted YAML `off` reads as False; handled)
+  bastion.dan_jailbreak: shadow      # runs, reported, never blocks
+  bastion.ignore_previous: enforce   # explicit; same as its stable default
+  bastion.judge: shadow              # registered even when no judge is configured
+  supply.tool_poisoning: shadow      # bastionsupply's namespace: ignored by agentbastion
+
+gate:                                # bastiongate's own knobs; agentbastion never looks inside
+  scan_results: true
+  result_inspector: agentbastion
+
+bastion: {}                          # reserved for agentbastion knobs; must be empty in 0.12
