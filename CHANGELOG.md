@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0
+
+- **`policy_version: 2`**: reads the suite's shared v2 policy format (the same file
+  agentbastion reads). Gate knobs move under a strictly validated `gate:` block;
+  typos, bad values, stray keys and v1-style top-level knobs in a v2 file stop the
+  gate at startup instead of silently falling back to defaults. v1 files load
+  exactly as before.
+- **agentbastion kill switch in deep-inspect**: `detectors: {bastion.<id>: off |
+  shadow | enforce}` is applied by `result_inspector: agentbastion` on every
+  inspector branch (the heuristic-only branch previously built a bare Firewall and
+  could not honor modes). Unknown IDs fail at startup with a did-you-mean hint;
+  shadow hits are named in the gate trace.
+- Gate's own checks have no detector IDs: the knobs are the modes (`scan_*: false`
+  = off, `on_*: warn` = shadow). `gate.*` lines are rejected with that mapping.
+- The `agentbastion` extras now require `agentbastion>=0.12.0`.
+- A `detectors:` block without `policy_version: 2` raises instead of being ignored.
+- `PolicyError` (a `ValueError`) is exported for callers that validate policies.
+
 ## 0.7.0
 
 - The tools/list filter now drops tools flagged `homoglyph-name` by bastionsupply

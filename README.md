@@ -86,6 +86,39 @@ tools:
 So the pipeline is: **scan the server with bastionsupply → `harden` a policy →
 run it live behind bastiongate.**
 
+### `policy_version: 2` (bastiongate ≥ 0.8)
+
+The same file format agentbastion reads: a shared core (`default`, `allow`, `deny`,
+`rate_limits`, `detectors`) plus one block per tool. Gate's knobs move under `gate:`:
+
+```yaml
+policy_version: 2
+default: deny
+allow: [get_weather, search_docs]
+detectors:
+  bastion.exfil_action: off        # agentbastion kill switch, applied in deep-inspect
+  bastion.dan_jailbreak: shadow    # runs, named in the gate trace, never blocks
+gate:
+  result_inspector: agentbastion   # required for bastion.* lines
+  on_injected_result: block
+  tools:
+    fetch: {on_injected_result: warn}
+```
+
+- **Gate's own checks have no detector IDs: the knobs are the modes.**
+  `off` = `scan_tools` / `scan_results` / `scrub_args` / `scrub_results: false`;
+  `shadow` = `on_*: warn` (log only, let it through); `enforce` = `block` / `redact`.
+  A `gate.*` line in `detectors:` is rejected with that mapping.
+- `bastion.*` lines reach agentbastion's deep-inspect and need
+  `result_inspector: agentbastion` plus `agentbastion ≥ 0.12` (the
+  `bastiongateway[agentbastion…]` extras require it).
+- Strict: unknown keys, typos (`scan_result`), bad actions (`wran`), a v1-style
+  top-level knob in a v2 file, unknown detector IDs, or `bastion.*` lines without
+  the agentbastion inspector **stop the gate at startup**, never silently.
+- `default:` is required only alongside `allow` / `deny` / `rate_limits`; without
+  them every tool is allowed. `rate_limits` is accepted and ignored (gate has no
+  rate limiter). v1 files (no `policy_version`) load exactly as before.
+
 ### Argument PII/secret scrub
 
 On every `tools/call` the gate scans the arguments the agent is about to send
