@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 
 from ..guards import Decision
-from ..policy import GatePolicy
+from ..policy import GatePolicy, PolicyError
 
 
 def build_inspector(policy: GatePolicy):
@@ -32,25 +32,42 @@ def build_inspector(policy: GatePolicy):
     if policy.inspector_semantic:
         detectors.append(_semantic_detector())
     judge = _judge() if policy.inspector_judge else None
+    # a verdict cache spares repeat results the judge round-trip
+    cache = _cache() if judge else None
 
-    if detectors or judge:
-        # a verdict cache spares repeat results the judge/semantic round-trip
-        cache = _cache() if judge else None
-        firewall = Firewall(inbound=InboundGuard(judge=judge, detectors=detectors, cache=cache))
-        if policy.inspector_semantic:
-            _warm(firewall)  # load the model + embed templates now, not on first result
-    else:
-        firewall = Firewall()  # heuristic only
+    # Every branch (heuristic-only included) builds the guard with the policy's
+    # detector modes, so a bastion.* kill switch applies however the gate is set up.
+    guard = _guard(InboundGuard, policy.detector_modes, judge=judge, detectors=detectors, cache=cache)
+    firewall = Firewall(inbound=guard)
+    if policy.inspector_semantic:
+        _warm(firewall)  # load the model + embed templates now, not on first result
 
     def inspect(text: str) -> Decision:
         if not text:
             return Decision(True, "empty result")
         verdict = firewall.check_tool_result(text)
+        shadow = getattr(verdict, "shadow_hits", ())
+        note = f" (shadow: {', '.join(shadow)})" if shadow else ""  # surfaces in the gate trace
         if verdict.allowed:
-            return Decision(True, "agentbastion: clean")
-        return Decision(False, f"agentbastion blocked: {verdict.reason}", tuple(verdict.matches))
+            return Decision(True, f"agentbastion: clean{note}")
+        return Decision(False, f"agentbastion blocked: {verdict.reason}{note}", tuple(verdict.matches))
 
     return inspect
+
+
+def _guard(inbound_guard_cls, modes: dict, **kwargs):
+    """agentbastion validates the mode IDs itself (unknown IDs get a did-you-mean);
+    re-raise as bastiongate's PolicyError so the gate fails at startup, loudly."""
+    if not modes:
+        return inbound_guard_cls(**kwargs)
+    try:
+        return inbound_guard_cls(modes=modes, **kwargs)
+    except TypeError as e:  # agentbastion < 0.12 has no detector modes
+        raise PolicyError(
+            'detector modes need agentbastion>=0.12: pip install -U "bastiongateway[agentbastion]"'
+        ) from e
+    except ValueError as e:  # agentbastion.tools.PolicyError: unknown ID, bad mode
+        raise PolicyError(str(e)) from e
 
 
 def _warm(firewall) -> None:
