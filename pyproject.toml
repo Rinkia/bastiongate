@@ -25,7 +25,8 @@ agentbastion = ["agentbastion>=0.12.0"]
 agentbastion-judge = ["agentbastion>=0.12.0", "anthropic>=0.40"]
 agentbastion-semantic = ["agentbastion>=0.12.0", "httpx>=0.27"]
 agentbastion-local = ["agentbastion>=0.12.0", "sentence-transformers>=2.0"]
-dev = ["pytest>=7.0"]
+# agentbastion is in dev so CI runs the deep-inspect integration tests (they skip without it).
+dev = ["pytest>=7.0", "agentbastion>=0.12.0"]
 
 [project.scripts]
 bastiongate = "bastiongate.cli:main"

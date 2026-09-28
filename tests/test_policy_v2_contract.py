@@ -8,10 +8,18 @@ breaks loudly on both sides, never silently.
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
+
+import pytest
 
 from bastiongate.integrations.agentbastion import build_inspector
 from bastiongate.policy import BLOCK, REDACT, load_policy
+
+needs_agentbastion = pytest.mark.skipif(
+    importlib.util.find_spec("agentbastion") is None,
+    reason="deep-inspect needs the optional agentbastion extra",
+)
 
 GOLDEN = Path(__file__).parent / "fixtures" / "policy_v2_golden.yaml"
 
@@ -45,6 +53,7 @@ def test_golden_tool_decisions():
     assert policy.tool_allowed("delete_account") is False  # not on the allow list
 
 
+@needs_agentbastion
 def test_golden_deep_inspect_decisions():
     inspect = build_inspector(load_policy(GOLDEN))
     assert inspect(EXFIL).allowed is True                    # kill switch
