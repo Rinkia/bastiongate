@@ -43,6 +43,11 @@ class GatePolicy:
     # per-tool knob overrides: {tool_name: {knob: value}}
     tools: dict = field(default_factory=dict)
 
+    # policy_version 2: detector modes forwarded to agentbastion deep-inspect,
+    # {bastion.* / custom.*: off | shadow | enforce}. Gate's own checks have no
+    # detector IDs: their knobs are the modes (scan_*: false = off, on_*: warn = shadow).
+    detector_modes: dict = field(default_factory=dict)
+
     # knobs that a per-tool override may set
     _OVERRIDABLE = ("scrub_args", "on_pii_arg", "scan_results", "on_injected_result",
                     "scrub_results", "on_pii_result")
@@ -62,15 +67,171 @@ class GatePolicy:
         return getattr(self, knob)
 
 
+class PolicyError(ValueError):
+    """A policy that must not load. policy_version 2 fails loudly instead of ignoring lines."""
+
+
 def load_policy(path: str | Path) -> GatePolicy:
     # YAML is a superset of JSON, so safe_load reads both harden output shapes.
     obj = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     if not isinstance(obj, dict):
-        raise ValueError("policy file must be a mapping")
+        raise PolicyError("policy file must be a mapping")
     return from_dict(obj)
 
 
 def from_dict(obj: dict) -> GatePolicy:
+    version = obj.get("policy_version", 1)
+    if isinstance(version, bool) or version not in (1, 2):
+        raise PolicyError(f"unsupported policy_version {version!r}; this bastiongate reads 1 and 2")
+    if version == 2:
+        return _from_v2(obj)
+    if "detectors" in obj:
+        raise PolicyError(
+            "`detectors:` requires `policy_version: 2` at the top of the file; "
+            "without it the block would be silently ignored"
+        )
+    return _from_v1(obj)
+
+
+# --- policy_version 2 --------------------------------------------------------
+# Top level = a frozen shared core + one block per tool. Gate reads its own `gate:`
+# block strictly and never looks inside another tool's block.
+_V2_CORE = frozenset({"policy_version", "default", "allow", "deny", "rate_limits", "detectors"})
+_V2_BLOCKS = frozenset({"gate", "bastion", "supply", "skill"})
+_TOOL_POLICY_LISTS = ("allow", "deny", "rate_limits")
+_BOOL_KNOBS = ("scan_tools", "scan_results", "scrub_args", "scrub_results",
+               "inspector_judge", "inspector_semantic")
+_CHOICE_KNOBS = {
+    "on_poisoned_tool": (BLOCK, WARN),
+    "on_injected_result": (BLOCK, WARN),
+    "on_pii_arg": (REDACT, BLOCK, WARN),
+    "on_pii_result": (REDACT, BLOCK, WARN),
+    "result_inspector": ("static", "agentbastion"),
+    "inspector_fail": ("closed", "open"),
+}
+_GATE_KNOBS = frozenset(_BOOL_KNOBS) | frozenset(_CHOICE_KNOBS) | {"tools"}
+_MODES = ("off", "shadow", "enforce")
+_INSPECTOR_NAMESPACES = ("bastion.", "custom.")  # run by agentbastion deep-inspect
+_IGNORED_NAMESPACES = ("supply.", "skill.")  # tools gate never runs
+
+
+def _from_v2(obj: dict) -> GatePolicy:
+    unknown = set(obj) - _V2_CORE - _V2_BLOCKS
+    if unknown:
+        misplaced = sorted(unknown & _GATE_KNOBS)
+        if misplaced:
+            raise PolicyError(f"in policy_version 2 gate knobs live under `gate:`; move {misplaced} there")
+        raise PolicyError(
+            f"unknown top-level key(s) {sorted(unknown)}; policy_version 2 allows "
+            f"{sorted(_V2_CORE | _V2_BLOCKS)}"
+        )
+    gate = obj.get("gate") or {}
+    if not isinstance(gate, dict):
+        raise PolicyError("`gate:` must be a mapping of gate knobs")
+    stray = set(gate) - _GATE_KNOBS
+    if stray:
+        raise PolicyError(f"unknown key(s) in `gate:` {sorted(stray)}; allowed: {sorted(_GATE_KNOBS)}")
+    for knob, value in gate.items():
+        if knob != "tools":
+            _check_knob(knob, value, "gate")
+    tools = gate.get("tools") or {}
+    _check_per_tool(tools)
+
+    modes = _v2_detector_modes(obj.get("detectors"))
+    if modes and gate.get("result_inspector", "static") != "agentbastion":
+        raise PolicyError(
+            f"detector modes {sorted(modes)} run in agentbastion deep-inspect; set "
+            "`gate: {result_inspector: agentbastion}`, or remove them (a kill switch must "
+            "never look honored when nothing executes it)"
+        )
+    knobs = {k: v for k, v in gate.items() if k != "tools"}
+    return GatePolicy(
+        default=_v2_default(obj),
+        allow=frozenset(obj.get("allow", []) or []),
+        deny=frozenset(obj.get("deny", []) or []),
+        tools=tools,
+        detector_modes=modes,
+        **knobs,
+    )
+
+
+def _check_knob(knob: str, value, where: str) -> None:
+    if knob in _BOOL_KNOBS and not isinstance(value, bool):
+        raise PolicyError(f"`{where}.{knob}` must be true or false, got {value!r}")
+    if knob in _CHOICE_KNOBS and value not in _CHOICE_KNOBS[knob]:
+        raise PolicyError(f"`{where}.{knob}`: {value!r} is not one of {' | '.join(_CHOICE_KNOBS[knob])}")
+
+
+def _check_per_tool(tools) -> None:
+    if not isinstance(tools, dict):
+        raise PolicyError("`gate.tools` must map tool names to knob overrides")
+    for tool, override in tools.items():
+        if not isinstance(override, dict):
+            raise PolicyError(f"`gate.tools.{tool}` must be a mapping of knob overrides")
+        not_overridable = set(override) - set(GatePolicy._OVERRIDABLE)
+        if not_overridable:
+            raise PolicyError(
+                f"`gate.tools.{tool}`: {sorted(not_overridable)} cannot be set per tool; "
+                f"per-tool knobs: {sorted(GatePolicy._OVERRIDABLE)}"
+            )
+        for knob, value in override.items():
+            _check_knob(knob, value, f"gate.tools.{tool}")
+
+
+def _v2_default(obj: dict) -> str:
+    if "default" not in obj:
+        if any(key in obj for key in _TOOL_POLICY_LISTS):
+            raise PolicyError("`default:` (allow or deny) is required when allow, deny or rate_limits is set")
+        return "allow"  # no tool lists: every tool allowed, as with gate's v1 default
+    default = str(obj["default"]).lower()
+    if default not in ("allow", "deny"):
+        raise PolicyError(f"`default:` must be allow or deny, got {obj['default']!r}")
+    if default == "allow" and obj.get("allow"):
+        raise PolicyError(
+            "`default: allow` contradicts a non-empty allow list: whenever an allow list exists, "
+            "unlisted tools are denied. Use `default: deny`, or drop the allow list"
+        )
+    return default
+
+
+def _v2_detector_modes(raw) -> dict:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise PolicyError("`detectors:` must be a mapping of detector ID to off | shadow | enforce")
+    modes = {}
+    for det_id, mode in raw.items():
+        if not isinstance(det_id, str):
+            raise PolicyError(f"detector ID must be a string, got {det_id!r}")
+        if det_id.startswith("gate."):
+            raise PolicyError(
+                f"{det_id!r}: bastiongate has no detector IDs; its `gate:` knobs are the modes "
+                "(off = scan_tools/scan_results/scrub_args/scrub_results: false, shadow = on_*: warn, "
+                "e.g. on_poisoned_tool, on_injected_result, on_pii_arg, on_pii_result)"
+            )
+        if det_id.startswith(_IGNORED_NAMESPACES):
+            continue
+        if not det_id.startswith(_INSPECTOR_NAMESPACES):
+            hint = f"; did you mean {'bastion.' + det_id!r}?" if "." not in det_id else ""
+            raise PolicyError(f"detector ID {det_id!r} has no known namespace{hint}")
+        modes[det_id] = _mode(det_id, mode)
+    return modes
+
+
+def _mode(det_id: str, mode) -> str:
+    # YAML 1.1 reads unquoted off/no/false as False, on/yes/true as True.
+    if mode is False:
+        return "off"
+    if mode is True:
+        raise PolicyError(f"detector {det_id!r}: mode `on`/`true` is ambiguous; write enforce or shadow")
+    if mode not in _MODES:
+        raise PolicyError(f"detector {det_id!r}: mode {mode!r} is not one of off | shadow | enforce")
+    return mode
+
+
+# --- policy_version 1 (unchanged) --------------------------------------------
+
+def _from_v1(obj: dict) -> GatePolicy:
     return GatePolicy(
         default=obj.get("default", "allow"),
         allow=frozenset(obj.get("allow", []) or []),
