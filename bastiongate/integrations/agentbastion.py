@@ -21,6 +21,7 @@ from ..policy import GatePolicy, PolicyError
 def build_inspector(policy: GatePolicy):
     try:
         from agentbastion import Firewall
+        from agentbastion.events import EventLog
         from agentbastion.inbound import InboundGuard
     except ImportError as e:  # fail fast at gate construction, not per-call
         raise RuntimeError(
@@ -38,7 +39,9 @@ def build_inspector(policy: GatePolicy):
     # Every branch (heuristic-only included) builds the guard with the policy's
     # detector modes, so a bastion.* kill switch applies however the gate is set up.
     guard = _guard(InboundGuard, policy.detector_modes, judge=judge, detectors=detectors, cache=cache)
-    firewall = Firewall(inbound=guard)
+    # no agentbastion.jsonl in the cwd: the gate's own trace (--log) records every
+    # decision, and a second unredacted log of result text would be a leak
+    firewall = Firewall(inbound=guard, log=EventLog(None))
     if policy.inspector_semantic:
         _warm(firewall)  # load the model + embed templates now, not on first result
 
