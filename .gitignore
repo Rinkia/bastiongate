@@ -9,3 +9,4 @@ venv/
 hardening/
 .DS_Store
 agentbastion.jsonl
+.coverage
