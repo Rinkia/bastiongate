@@ -16,6 +16,9 @@ BLOCK = "block"  # refuse the call / drop the tool
 WARN = "warn"  # log only, let it through
 REDACT = "redact"  # (args only) replace the secret/PII, forward the rest
 
+# flow-guard tool labels (see flows.py)
+LABEL_NAMES = ("private", "untrusted", "egress")
+
 
 @dataclass(frozen=True)
 class GatePolicy:
@@ -40,7 +43,12 @@ class GatePolicy:
     inspector_judge: bool = False  # agentbastion: also use the Anthropic LLM judge
     inspector_semantic: bool = False  # agentbastion: also use the semantic detector
 
-    # per-tool knob overrides: {tool_name: {knob: value}}
+    # flow guard (flows.py): untrusted + private read in one session, then egress
+    scan_flows: bool = True  # track session taint and check egress calls
+    on_tainted_egress: str = WARN  # warn (shadow, default) | block (-32005)
+    label_packs: bool = True  # built-in labels for common servers (github, fetch, ...)
+
+    # per-tool knob overrides: {tool_name: {knob: value}}; `labels` sets flow labels
     tools: dict = field(default_factory=dict)
 
     # policy_version 2: detector modes forwarded to agentbastion deep-inspect,
@@ -50,7 +58,7 @@ class GatePolicy:
 
     # knobs that a per-tool override may set
     _OVERRIDABLE = ("scrub_args", "on_pii_arg", "scan_results", "on_injected_result",
-                    "scrub_results", "on_pii_result")
+                    "scrub_results", "on_pii_result", "on_tainted_egress")
 
     def tool_allowed(self, name: str) -> bool:
         if name in self.deny:
@@ -65,6 +73,13 @@ class GatePolicy:
         if override and knob in override:
             return override[knob]
         return getattr(self, knob)
+
+    def tool_labels(self, tool: str) -> frozenset[str] | None:
+        """Explicit flow labels for `tool` from its per-tool override, else None."""
+        override = self.tools.get(tool)
+        if isinstance(override, dict) and "labels" in override:
+            return frozenset(override["labels"])
+        return None
 
 
 class PolicyError(ValueError):
@@ -100,15 +115,17 @@ _V2_CORE = frozenset({"policy_version", "default", "allow", "deny", "rate_limits
 _V2_BLOCKS = frozenset({"gate", "bastion", "supply", "skill"})
 _TOOL_POLICY_LISTS = ("allow", "deny", "rate_limits")
 _BOOL_KNOBS = ("scan_tools", "scan_results", "scrub_args", "scrub_results",
-               "inspector_judge", "inspector_semantic")
+               "inspector_judge", "inspector_semantic", "scan_flows", "label_packs")
 _CHOICE_KNOBS = {
     "on_poisoned_tool": (BLOCK, WARN),
     "on_injected_result": (BLOCK, WARN),
     "on_pii_arg": (REDACT, BLOCK, WARN),
     "on_pii_result": (REDACT, BLOCK, WARN),
+    "on_tainted_egress": (WARN, BLOCK),
     "result_inspector": ("static", "agentbastion"),
     "inspector_fail": ("closed", "open"),
 }
+_FLOW_KNOBS = ("scan_flows", "on_tainted_egress", "label_packs")
 _GATE_KNOBS = frozenset(_BOOL_KNOBS) | frozenset(_CHOICE_KNOBS) | {"tools"}
 _MODES = ("off", "shadow", "enforce")
 _INSPECTOR_NAMESPACES = ("bastion.", "custom.")  # run by agentbastion deep-inspect
@@ -168,14 +185,25 @@ def _check_per_tool(tools) -> None:
     for tool, override in tools.items():
         if not isinstance(override, dict):
             raise PolicyError(f"`gate.tools.{tool}` must be a mapping of knob overrides")
-        not_overridable = set(override) - set(GatePolicy._OVERRIDABLE)
+        per_tool = set(GatePolicy._OVERRIDABLE) | {"labels"}
+        not_overridable = set(override) - per_tool
         if not_overridable:
             raise PolicyError(
                 f"`gate.tools.{tool}`: {sorted(not_overridable)} cannot be set per tool; "
-                f"per-tool knobs: {sorted(GatePolicy._OVERRIDABLE)}"
+                f"per-tool knobs: {sorted(per_tool)}"
             )
         for knob, value in override.items():
-            _check_knob(knob, value, f"gate.tools.{tool}")
+            if knob == "labels":
+                _check_labels(value, f"gate.tools.{tool}")
+            else:
+                _check_knob(knob, value, f"gate.tools.{tool}")
+
+
+def _check_labels(value, where: str) -> None:
+    if not isinstance(value, list) or not all(v in LABEL_NAMES for v in value):
+        raise PolicyError(
+            f"`{where}.labels` must be a list drawn from {' | '.join(LABEL_NAMES)}, got {value!r}"
+        )
 
 
 def _v2_default(obj: dict) -> str:
@@ -206,8 +234,8 @@ def _v2_detector_modes(raw) -> dict:
         if det_id.startswith("gate."):
             raise PolicyError(
                 f"{det_id!r}: bastiongate has no detector IDs; its `gate:` knobs are the modes "
-                "(off = scan_tools/scan_results/scrub_args/scrub_results: false, shadow = on_*: warn, "
-                "e.g. on_poisoned_tool, on_injected_result, on_pii_arg, on_pii_result)"
+                "(off = scan_tools/scan_results/scrub_args/scrub_results/scan_flows: false, shadow = on_*: warn, "
+                "e.g. on_poisoned_tool, on_injected_result, on_pii_arg, on_pii_result, on_tainted_egress)"
             )
         if det_id.startswith(_IGNORED_NAMESPACES):
             continue
@@ -229,9 +257,24 @@ def _mode(det_id: str, mode) -> str:
     return mode
 
 
-# --- policy_version 1 (unchanged) --------------------------------------------
+# --- policy_version 1 (lenient, as before; flow-guard keys added in 0.9) --------
 
 def _from_v1(obj: dict) -> GatePolicy:
+    # keys added in 0.9 are validated even in v1 (no older file can contain them);
+    # pre-0.9 v1 keys stay lenient so existing files load exactly as before
+    for knob in _FLOW_KNOBS:
+        if knob in obj:
+            _check_knob(knob, obj[knob], "policy")
+    tools = obj.get("tools", {}) or {}
+    if isinstance(tools, dict):
+        for tool, override in tools.items():
+            if not isinstance(override, dict):
+                continue
+            # a string `labels: "egress"` must never be iterated character by character
+            if "labels" in override:
+                _check_labels(override["labels"], f"tools.{tool}")
+            if "on_tainted_egress" in override:
+                _check_knob("on_tainted_egress", override["on_tainted_egress"], f"tools.{tool}")
     return GatePolicy(
         default=obj.get("default", "allow"),
         allow=frozenset(obj.get("allow", []) or []),
@@ -248,5 +291,8 @@ def _from_v1(obj: dict) -> GatePolicy:
         inspector_fail=obj.get("inspector_fail", "closed"),
         inspector_judge=obj.get("inspector_judge", False),
         inspector_semantic=obj.get("inspector_semantic", False),
-        tools=obj.get("tools", {}) or {},
+        scan_flows=obj.get("scan_flows", True),
+        on_tainted_egress=obj.get("on_tainted_egress", WARN),
+        label_packs=obj.get("label_packs", True),
+        tools=tools,
     )

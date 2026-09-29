@@ -136,6 +136,11 @@ def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None =
                 if reply is not None:
                     return self._json(200, reply)  # blocked before upstream
                 body = json.dumps(forward).encode("utf-8")
+            elif batch_has_tool_call(msg):
+                trace.emit("http_batch_rejected", n=len(msg))
+                return self._simple(400, "bastiongate: JSON-RPC batches containing tools/call are "
+                                         "not supported (they would bypass tool policy and the flow "
+                                         "guard); send one message per request")
             else:
                 trace.emit("http_batch_passthrough", n=len(msg) if isinstance(msg, list) else 0)
 
@@ -249,6 +254,12 @@ def make_handler(upstream: str, gate: Gate, trace: Trace, auth_key: str | None =
 
 
 # --- SSE framing (module-level so it's unit-testable) -----------------------
+def batch_has_tool_call(msg) -> bool:
+    """True for a JSON-RPC batch array that carries a tools/call request."""
+    return isinstance(msg, list) and any(
+        isinstance(m, dict) and m.get("method") == "tools/call" for m in msg)
+
+
 def _iter_sse_events(resp):
     """Yield raw SSE event blocks (list of lines) from a streaming response."""
     lines: list[str] = []
@@ -293,7 +304,7 @@ def run_http(upstream: str, policy: GatePolicy, host: str = "127.0.0.1",
     if scheme not in ("http", "https"):
         raise ValueError(f"upstream must be http/https, got {scheme!r}")
     trace = Trace(log_path)
-    gate = Gate(policy, trace)
+    gate = Gate(policy, trace, transport="http")
     httpd = ThreadingHTTPServer((host, port), make_handler(upstream, gate, trace, auth_key))
     trace.emit("gate_http_start", upstream=upstream, listen=f"{host}:{port}", auth=bool(auth_key))
     try:

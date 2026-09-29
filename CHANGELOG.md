@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.0
+
+- **Flow guard (lethal trifecta).** A per-session taint record catches an egress
+  call made after the session read both untrusted content and private data, even
+  when every single call passes (the GitHub MCP toxic flow). Tools are labelled
+  `untrusted` / `private` / `egress` from per-tool policy `labels`, built-in packs
+  for common servers (github, filesystem, fetch, slack, gmail), then bastionsupply
+  capability categories (auto labels only add `egress`). A GitHub same-repo rule
+  keeps "fix issue #N" silent. New knobs: `scan_flows`, `on_tainted_egress`
+  (`warn` | `block`, per-tool overridable), `label_packs`, per-tool `labels`.
+- **BEHAVIOR:** the flow guard runs by default in **warn** (shadow) mode: it
+  forwards the call, writes a `tainted_egress` trace event and prints one stderr
+  line. `on_tainted_egress: block` returns JSON-RPC `-32005`. Promotion of the
+  default to `block` needs the replay suite plus a dogfood run over >= 20 real
+  sessions with 0 false blocks.
+- **`bastiongate labels`** prints each tool's labels and where they came from.
+- `python -m bastiongate.demo` replays the toxic flow (warn, then block).
+- Metrics: `tainted_egress_warned`, `tainted_egress_blocked`, `labels_unavailable`,
+  `taint_evicted`. Trace events: `tainted_egress`, `labels_unavailable`,
+  `flow_guard_no_session` (session ids are hashed, content is never logged).
+- Per-tool `labels` is validated in v1 files too (a string would otherwise be read
+  one character at a time).
+- Requires `bastionsupply>=0.9.0` (`capability_categories`).
+
+### Upgrading
+
+- Nothing blocks by default. Expect stderr warnings when a session reads untrusted
+  and private content and then calls an egress tool; opt out with
+  `scan_flows: false`, or tune per tool with `labels` / `on_tainted_egress`.
+- Older gates silently ignore the new keys, even in v1 files: run
+  `bastionsupply doctor --policy policy.yaml` (bastionsupply >= 0.9) to check.
+- Next: cross-server taint (TODOS.md E4), runtime A2A gate (E2).
+
 ## 0.8.1
 
 - **Fix:** `result_inspector: agentbastion` no longer writes `agentbastion.jsonl` into

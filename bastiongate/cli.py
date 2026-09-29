@@ -4,6 +4,9 @@
     bastiongate run --log gate.jsonl -- npx -y @some/mcp-server
     bastiongate run --policy policy.yaml -- python my_server.py
 
+    # which flow-guard labels each tool gets (policy | pack | auto)
+    bastiongate labels --policy policy.yaml tools.json
+
 The gate speaks MCP stdio to the agent on one side and to the real server on the
 other. Point your MCP client's `command` at `bastiongate run -- <server...>`.
 """
@@ -41,7 +44,14 @@ def main(argv=None) -> int:
     ph.add_argument("--no-scan-tools", action="store_true", help="don't scan tools/list")
     ph.add_argument("--no-scan-results", action="store_true", help="don't scan tool results")
 
+    pl = sub.add_parser("labels", help="show the flow-guard labels each tool gets, and why")
+    pl.add_argument("--policy", help="gate policy YAML/JSON (per-tool `labels`, `label_packs`)")
+    pl.add_argument("tools", nargs="?", help="a tools/list JSON dump; omit to list the built-in packs")
+
     args = ap.parse_args(argv)
+
+    if args.cmd == "labels":
+        return _cmd_labels(args)
 
     if args.cmd == "run":
         server_argv = _strip_dashes(args.server)
@@ -61,6 +71,36 @@ def main(argv=None) -> int:
         return run_http(args.upstream, policy, args.host, args.port, args.log, auth_key)
 
     return 2
+
+
+def _cmd_labels(args) -> int:
+    """Print tool -> labels -> source (policy | pack:<name> | auto | none), no proxy."""
+    import json
+    from pathlib import Path
+
+    from . import flows
+
+    policy = load_policy(args.policy) if args.policy else GatePolicy()
+    labels = flows.Labels()
+    if args.tools:
+        try:
+            obj = json.loads(Path(args.tools).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"bastiongate: cannot read tools file {args.tools}: {e}", file=sys.stderr)
+            return 2
+        if isinstance(obj, dict):
+            obj = (obj.get("result") or obj).get("tools", [])
+        tools = [t for t in obj if isinstance(t, dict)] if isinstance(obj, list) else []
+        labels.learn(tools)
+        names = [str(t.get("name", "")) for t in tools]
+    else:
+        names = [n for table in flows.PACKS.values() for n in table] if policy.label_packs else []
+        names += [n for n in policy.tools if n not in names]
+    print(f"{'TOOL':<30} {'LABELS':<28} SOURCE")
+    for name in names:
+        tool_labels, source = labels.lookup(name, policy)
+        print(f"{name:<30} {','.join(sorted(tool_labels)) or '-':<28} {source}")
+    return 0
 
 
 def _apply_flags(policy: GatePolicy, args) -> GatePolicy:
