@@ -119,6 +119,92 @@ gate:
   them every tool is allowed. `rate_limits` is accepted and ignored (gate has no
   rate limiter). v1 files (no `policy_version`) load exactly as before.
 
+### Flow guard
+
+_bastiongate ≥ 0.9._
+
+Every call can pass and the session can still leak. The GitHub MCP toxic flow:
+the agent reads a **public issue** that carries an injection, reads a file from a
+**private repo**, then opens a **pull request into the public repo** with the
+private content. The flow guard tracks that sequence per session and catches the
+egress call:
+
+```bash
+python -m bastiongate.demo
+# bastiongate: WARN tainted egress: create_pull_request (untrusted from get_issue, private from get_file_contents) - set labels or on_tainted_egress: block
+# ... -32005: bastiongate blocked tool call 'create_pull_request': ...
+```
+
+Each tool gets labels: `untrusted` (its result is attacker-reachable content),
+`private` (its result is private data), `egress` (calling it sends data out). An
+`egress` call after the session read both `untrusted` and `private` content is a
+**tainted egress**.
+
+- **Status: shadow.** Default `on_tainted_egress: warn` forwards the call, writes
+  a `tainted_egress` trace event and prints one stderr line. `block` returns
+  JSON-RPC error `-32005` naming the tools involved (never the content). The
+  default moves to `block` only after the replay suite passes and a dogfood run
+  over ≥ 20 real sessions shows 0 false blocks on benign flows.
+- **Where labels come from** (first match wins): per-tool `labels` in the policy
+  → built-in packs for common servers (exact tool names) → auto (bastionsupply
+  capability categories; auto only ever adds `egress`). See what each tool gets:
+
+  ```bash
+  bastiongate labels                              # the built-in packs
+  bastiongate labels --policy policy.yaml tools.json  # a tools/list dump
+  ```
+
+  | Pack | untrusted | private | egress |
+  |---|---|---|---|
+  | github | issue_read, list_issues, search_issues, pull_request_read, list_pull_requests, search_pull_requests, get_job_logs (+ legacy get_issue, get_issue_comments, get_pull_request, get_pull_request_comments) | get_file_contents, search_code, get_commit | issue_write, add_issue_comment, update_issue_comment, create_pull_request, update_pull_request, pull_request_review_write, add_comment_to_pending_review, add_reply_to_pull_request_comment, create_or_update_file, push_files, create_repository, fork_repository (+ legacy create_issue, update_issue) |
+  | filesystem | | read_file, read_text_file, read_multiple_files | |
+  | fetch | fetch | | fetch |
+  | slack | slack_get_channel_history, slack_get_thread_replies | | slack_post_message, slack_reply_to_thread |
+  | gmail | read_email, search_emails | read_email, search_emails | send_email |
+
+- **GitHub same-repo rule.** A private read from the same `owner/repo` the egress
+  call targets does not count, so the everyday "fix issue #N" flow (issue, file
+  and PR in one repo) stays silent.
+- Taint is set only by what the agent actually reads: a result the gate blocked
+  (`-32002`) sets nothing, and secrets `scrub_results` redacted do not count as
+  private. `private` also comes from credential-shaped secrets in a forwarded
+  result (keys, tokens, JWTs), never from emails or card numbers.
+
+```yaml
+# v1 top-level (or under `gate:` in policy_version 2)
+scan_flows: true            # false = off
+on_tainted_egress: warn     # warn | block
+label_packs: true           # false = explicit labels only
+tools:
+  internal_search: {labels: [private]}
+  create_pull_request: {on_tainted_egress: block}   # per-tool action
+```
+
+**Limits.** Taint lives per session per upstream server, in memory:
+- a chain that crosses two MCP servers (two gate processes) is **not** detected
+  (TODOS.md E4);
+- stdio is one session for the process; over HTTP the key is `Mcp-Session-Id`, so
+  a client that rotates it starts clean, and one that floods new ids can evict
+  other sessions' taint (the `taint_evicted` metric counts it);
+- an HTTP upstream that issues no session ids gets no flow guard (one warning);
+- taint clears after 30 minutes with no calls, or on `initialize` (any client
+  holding the session id can send one);
+- auto labels come from the server's own tool descriptions, so a malicious server
+  can word them to avoid `egress`: they are best-effort, packs and explicit
+  `labels` are the reliable path;
+- a tool with no label is never treated as egress, and auto labels need a
+  `tools/list` first (packs and policy labels apply immediately);
+- a private read counts only from its labelled tool or a credential-shaped secret
+  in a forwarded **text** block (not embedded `resource` blocks); an injection
+  inside a private read counts as untrusted only if the result inspector flags it;
+- the very first egress call is checked before its own result taints the session,
+  so exfiltration needs untrusted and private reads to have happened earlier;
+- a tool call whose response takes longer than 5 minutes loses correlation, and
+  its result is not labelled.
+
+Older gates silently ignore these keys: `bastionsupply doctor --policy policy.yaml`
+warns when bastiongateway < 0.9 would read them.
+
 ### Argument PII/secret scrub
 
 On every `tools/call` the gate scans the arguments the agent is about to send
@@ -209,9 +295,10 @@ out = gate.handle_server_msg(response)          # server -> agent
 - The HTTP proxy does not follow upstream redirects and only speaks
   `http`/`https` — a malicious upstream cannot bounce it to `file://` or an
   internal address.
-- **JSON-RPC batch arrays** on the request side are passed through un-gated
-  (responses are still scanned); single messages — the normal case — are fully
-  gated. Chunked request bodies (no `Content-Length`) are not supported.
+- **JSON-RPC batch arrays** on the request side: a batch containing `tools/call`
+  is rejected (`400`), since it would bypass tool policy and the flow guard; other
+  batches (notifications) pass through, and responses are still scanned. Single
+  messages — the normal case — are fully gated. Chunked request bodies (no `Content-Length`) are not supported.
 - `inspector_fail: closed` (default) blocks a result if the inspector errors or
   times out. The LLM judge runs on every result (cost + latency); it has a
   `BASTIONGATE_JUDGE_TIMEOUT` (default 10s).

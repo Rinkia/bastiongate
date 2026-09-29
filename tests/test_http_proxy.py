@@ -226,3 +226,12 @@ def test_http_sse_response_transformed(gate_over_http):
     payload = json.loads(data_line[5:].strip())
     names = [t["name"] for t in payload["result"]["tools"]]
     assert "search_docs" not in names
+
+
+def test_batch_containing_tools_call_is_rejected():
+    # a JSON-RPC batch would skip per-message gating (tool policy, flow guard)
+    from bastiongate.http_proxy import batch_has_tool_call
+
+    assert batch_has_tool_call([{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}}])
+    assert not batch_has_tool_call([{"jsonrpc": "2.0", "method": "notifications/initialized"}])
+    assert not batch_has_tool_call([])

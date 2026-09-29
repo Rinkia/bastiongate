@@ -1,12 +1,14 @@
 """The gate: a message-transform core plus a stdio proxy around it.
 
 `Gate` is pure and testable — feed it JSON-RPC dicts, get back what to forward
-(or a block/replacement). `run_stdio` wires it between the agent (this process's
+(or a block/replacement). Its flow guard (flows.py) keeps per-session taint so an
+egress call after untrusted + private reads is warned about or blocked (-32005). `run_stdio` wires it between the agent (this process's
 stdin/stdout) and a spawned upstream MCP server.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -15,7 +17,7 @@ import threading
 import time
 from collections import Counter, OrderedDict, deque
 
-from . import guards, jsonrpc, pii
+from . import flows, guards, jsonrpc, pii
 from .inspectors import make_inspector
 from .policy import BLOCK, REDACT, WARN, GatePolicy
 from .trace import Trace
@@ -24,6 +26,7 @@ BLOCK_TOOL_CODE = -32001
 BLOCK_RESULT_CODE = -32002
 BLOCK_ARG_CODE = -32003
 BLOCK_RESULT_PII_CODE = -32004
+BLOCK_FLOW_CODE = -32005
 
 # in-flight correlation bounds (per session, so one busy/abusive session can't
 # evict another's entries)
@@ -32,10 +35,20 @@ PENDING_TTL_SECONDS = 300  # reclaim entries whose response never came
 MAX_SESSIONS = 10000  # backstop: bound distinct tracked sessions (forged-id flood)
 
 
+def _stderr_warn(line: str) -> None:
+    print(line, file=sys.stderr, flush=True)
+
+
 class Gate:
-    def __init__(self, policy: GatePolicy, trace: Trace | None = None) -> None:
+    def __init__(self, policy: GatePolicy, trace: Trace | None = None, *,
+                 warn=_stderr_warn, transport: str = "stdio") -> None:
         self.policy = policy
         self.trace = trace or Trace(None)
+        self._warn = warn  # operator-visible one-liners (stderr by default)
+        self._transport = transport  # stdio: one process session | http: per Mcp-Session-Id
+        self._warned_once: set[str] = set()
+        self.labels = flows.Labels()
+        self.flows = flows.FlowGuard(self._bump)
         self._pending: dict = {}  # (session, id) -> (method, tool, ts)
         self._order: OrderedDict = OrderedDict()  # session -> deque of keys; LRU order
         self._lock = threading.Lock()
@@ -65,7 +78,9 @@ class Gate:
         if not jsonrpc.is_request(msg):
             return msg, None
         method = jsonrpc.method_of(msg)
-        if method == "tools/call":
+        if method == "initialize":
+            self.flows.reset(session)  # a new MCP session starts with clean taint
+        elif method == "tools/call":
             name = (msg.get("params") or {}).get("name", "")
             decision = guards.check_tool_call(name, self.policy)
             if not decision.allowed:
@@ -76,7 +91,11 @@ class Gate:
                 msg, reply = self._scrub_args(msg, name)
                 if reply is not None:
                     return None, reply
-            self._remember(session, msg.get("id"), "tools/call", name)
+            args = (msg.get("params") or {}).get("arguments")
+            reply = self._flow_check(msg.get("id"), name, args, session)
+            if reply is not None:
+                return None, reply
+            self._remember(session, msg.get("id"), "tools/call", name, flows.repo_of(name, args))
             self.trace.emit("tool_call", id=msg.get("id"), tool=name)
         elif method == "tools/list":
             self._remember(session, msg.get("id"), "tools/list", None)
@@ -112,25 +131,104 @@ class Gate:
         new_msg["params"] = new_params
         return new_msg, None
 
+    def _flow_check(self, mid, name: str, args, session) -> dict | None:
+        """Warn about (or block) an egress call that would complete the trifecta.
+        Returns an error reply to send instead of forwarding, or None."""
+        if not self.policy.scan_flows:
+            return None
+        if self._transport == "http" and session is None:
+            # no Mcp-Session-Id: never pool every client into one shared taint bucket
+            if self._once("flow_guard_no_session"):
+                self.trace.emit("flow_guard_no_session")
+                self._warn("bastiongate: WARN flow guard off for requests without an "
+                           "Mcp-Session-Id (upstream issues no session ids)")
+            return None
+        self.flows.touch(session)
+        labels, _source = self.labels.lookup(name, self.policy)
+        if flows.EGRESS not in labels:
+            return None
+        hit = self.flows.check(session, flows.repo_of(name, args))
+        if hit is None:
+            return None
+        untrusted_from, private_from = hit
+        action = self.policy.opt(name, "on_tainted_egress")
+        self.trace.emit("tainted_egress", id=mid, tool=name, action=action, labels=sorted(labels),
+                        untrusted_from=untrusted_from, private_from=private_from,
+                        session=_session_hash(session))
+        if action == BLOCK:
+            self._bump("tainted_egress_blocked")
+            return jsonrpc.error_response(
+                mid, BLOCK_FLOW_CODE,
+                f"bastiongate blocked tool call '{name}': it sends data out after this session read "
+                f"untrusted content (from '{untrusted_from}') and private data (from '{private_from}'). "
+                f"If this flow is expected, set `tools: {{{name}: {{labels: [...]}}}}` for the tools "
+                "involved, or `on_tainted_egress: warn` (README #flow-guard).",
+            )
+        self._bump("tainted_egress_warned")
+        self._warn(f"bastiongate: WARN tainted egress: {name} (untrusted from {untrusted_from}, "
+                   f"private from {private_from}) - set labels or on_tainted_egress: block")
+        return None
+
+    def _once(self, key: str) -> bool:
+        with self._metrics_lock:
+            if key in self._warned_once:
+                return False
+            self._warned_once.add(key)
+            return True
+
+    def labels_for(self, name: str) -> tuple[frozenset, str]:
+        """(labels, source) the flow guard uses for `name`: policy | pack:<x> | auto | none."""
+        return self.labels.lookup(name, self.policy)
+
     # --- server -> agent -----------------------------------------------------
     def handle_server_msg(self, msg: dict, session=None) -> dict | None:
         """Return the (possibly replaced/filtered) message to forward to the agent."""
         if not jsonrpc.is_response(msg):
             return msg
-        method, tool = self._recall(session, msg.get("id"))
+        method, tool, repo = self._recall(session, msg.get("id"))
 
-        if method == "tools/list" and self.policy.scan_tools:
-            return self._filter_tools(msg)
+        if method == "tools/list":
+            self._learn_labels(msg)
+            return self._filter_tools(msg) if self.policy.scan_tools else msg
         if method == "tools/call":
-            out = msg
+            out, flagged = msg, False
             if self.policy.opt(tool or "", "scan_results"):
-                out = self._scan_result(out, tool)
+                out, flagged = self._scan_result(out, tool)
                 if "error" in out:  # injection blocked; nothing left to scrub
                     return out
             if self.policy.opt(tool or "", "scrub_results"):
                 out = self._scrub_result(out, tool)
+            if self.policy.scan_flows and isinstance(out.get("result"), dict):
+                self._record_taint(out, tool or "", repo, flagged, session)
             return out
         return msg
+
+    def _learn_labels(self, msg: dict) -> None:
+        tools = jsonrpc.tools_from_list_result(msg)
+        if not tools:
+            return
+        try:
+            self.labels.learn(tools)
+        except Exception as e:  # noqa: BLE001 - label derivation must never crash the proxy
+            self.trace.emit("labels_unavailable", reason=type(e).__name__)
+            self._bump("labels_unavailable")
+            if self._once("labels_unavailable"):
+                self._warn("bastiongate: WARN tool labels unavailable "
+                           f"({type(e).__name__}); flow guard uses policy and pack labels only")
+
+    def _record_taint(self, out: dict, tool: str, repo, flagged: bool, session) -> None:
+        """Taint from what the agent will actually read: the forwarded result."""
+        labels, _source = self.labels.lookup(tool, self.policy)
+        text = jsonrpc.result_text(out)
+        structured = out["result"].get("structuredContent")
+        if structured is not None:
+            text = f"{text}\n{json.dumps(structured)}"
+        _red, kinds = pii.scrub_text(text)
+        self.flows.record_result(
+            session, tool, repo,
+            untrusted=flagged or flows.UNTRUSTED in labels,
+            private=flows.PRIVATE in labels or bool(flows.SECRET_KINDS & set(kinds)),
+        )
 
     # --- helpers -------------------------------------------------------------
     def _filter_tools(self, msg: dict) -> dict:
@@ -152,7 +250,7 @@ class Gate:
         new["result"] = new_result
         return new
 
-    def _scan_result(self, msg: dict, tool: str | None) -> dict:
+    def _scan_result(self, msg: dict, tool: str | None) -> tuple[dict, bool]:
         text = jsonrpc.result_text(msg)
         # also scan structuredContent — an injection can hide in structured JSON,
         # not just in text blocks
@@ -161,16 +259,16 @@ class Gate:
             text = f"{text}\n{json.dumps(result['structuredContent'])}"
         decision = self._inspect(text)
         if decision.allowed:
-            return msg
+            return msg, False
         self.trace.emit("result_blocked", id=msg.get("id"), tool=tool, reason=decision.reason)
         self._bump("result_injection_blocked")
         if self.policy.opt(tool or "", "on_injected_result") != BLOCK:
-            return msg
+            return msg, True  # forwarded in warn mode: the agent reads flagged content
         return jsonrpc.error_response(
             msg.get("id"),
             BLOCK_RESULT_CODE,
             f"bastiongate blocked tool result: {decision.reason}",
-        )
+        ), False
 
     def _scrub_result(self, msg: dict, tool: str | None) -> dict:
         """Redact/block secrets a tool RETURNS — in text content blocks AND in
@@ -218,7 +316,7 @@ class Gate:
         self._bump("result_pii_redacted")
         return {**msg, "result": new_result}
 
-    def _remember(self, session, mid, method, tool) -> None:
+    def _remember(self, session, mid, method, tool, repo=None) -> None:
         now = time.monotonic()
         key = (session, mid)
         with self._lock:
@@ -239,10 +337,10 @@ class Gate:
             # enforce this session's cap (evict only this session's oldest)
             while len(dq) >= MAX_PENDING_PER_SESSION:
                 self._pending.pop(dq.popleft(), None)
-            self._pending[key] = (method, tool, now)
+            self._pending[key] = (method, tool, now, repo)
             dq.append(key)
 
-    def _recall(self, session, mid) -> tuple[str | None, str | None]:
+    def _recall(self, session, mid) -> tuple[str | None, str | None, str | None]:
         key = (session, mid)
         with self._lock:
             entry = self._pending.pop(key, None)
@@ -253,8 +351,15 @@ class Gate:
                 else:
                     self._order.pop(session, None)
             if entry is None:
-                return (None, None)
-            return (entry[0], entry[1])
+                return (None, None, None)
+            return (entry[0], entry[1], entry[3])
+
+
+def _session_hash(session) -> str | None:
+    """Stable, non-reversible session label for the trace (never the raw id)."""
+    if session is None:
+        return None
+    return hashlib.sha256(str(session).encode("utf-8")).hexdigest()[:12]
 
 
 def run_stdio(server_argv: list[str], policy: GatePolicy, log_path: str | None = None) -> int:

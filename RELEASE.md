@@ -14,6 +14,12 @@ Publishing is automatic: pushing a **GitHub Release** tag triggers the OIDC publ
 - [ ] Bump `__version__` in the package `__init__.py` **and** `version` in `pyproject.toml` (keep them equal).
 - [ ] Update `CHANGELOG.md` (or the README changelog section) with the new version + date.
 
+## Flow-guard label packs
+
+- [ ] Re-check `bastiongate/flows.py` `PACKS` tool names against the upstream servers
+      (github-mcp-server, filesystem, fetch, slack, gmail). A renamed upstream tool
+      silently loses its pack label (explicit policy `labels` still apply).
+
 ## Build & verify locally
 
 ```bash

@@ -1,5 +1,39 @@
 # TODOS
 
+## Open
+
+### E2: runtime A2A gate (bastionmesh)
+
+**What:** Proxy A2A JSON-RPC (`message/send`, `tasks/*`) the way bastiongate proxies MCP: scan message parts for injection, apply allow/deny per peer agent, cap delegation depth and fan-out.
+
+**Why:** The L5 plan (2026-09-29) covers A2A cards statically (bastionsupply) and multi-agent runs forensically (bastiontrace), but nothing enforces inline between agents (OWASP ASI07/ASI08).
+
+**Context:** Plan and review: `~/.gstack/projects/Varie/stefano-agentic-l5-plan-20260929-autoplan.md`. Reuse the flow-guard labels and taint semantics from gate 0.9.
+
+**Effort:** L
+**Priority:** P2
+**Depends on:** gate 0.9.0 flow guard.
+
+### E4: cross-server taint
+
+**What:** Share flow-guard taint across gate processes, so a chain that reads a secret through server A and sends it out through server B is caught. Two options: a local shared store, or one gate fronting multiple upstreams.
+
+**Why:** Gate 0.9 taint is per session, per upstream server. The common trifecta (filesystem server + fetch server) crosses servers and passes today. This is the documented critical gap in the L5 plan's failure registry.
+
+**Effort:** L
+**Priority:** P2
+**Depends on:** gate 0.9.0.
+
+### T3: gate as an OTel GenAI span producer
+
+**What:** Emit `execute_tool` spans with hashed content plus verdict attributes, so gate plugs into existing observability stacks and bastiontrace gets traces the suite guarantees exist.
+
+**Why:** Outside-voice 10x reframe in the L5 review. Most OTel exports lack content, and gate can produce reliable traces itself.
+
+**Effort:** M
+**Priority:** P3
+
+
 ## Completed
 
 ### A2 follow-ups outside this repo (done)
