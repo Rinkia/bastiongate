@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **Fix:** `result_inspector: agentbastion` no longer writes `agentbastion.jsonl` into
+  the gate's working directory. agentbastion's Firewall defaulted to its own event log,
+  an unredacted second copy of flagged result text next to the gate's `--log` trace.
+  The gate trace remains the single record. The file is also no longer tracked here.
+
 ## 0.8.0
 
 - **`policy_version: 2`**: reads the suite's shared v2 policy format (the same file

@@ -8,3 +8,4 @@ build/
 venv/
 hardening/
 .DS_Store
+agentbastion.jsonl
