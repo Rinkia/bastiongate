@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.1
 
 - **Fix:** `result_inspector: agentbastion` no longer writes `agentbastion.jsonl` into
   the gate's working directory. agentbastion's Firewall defaulted to its own event log,
