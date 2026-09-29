@@ -1,20 +1,12 @@
 # TODOS
 
-## Policy
-
-### A2 follow-ups outside this repo
-
-**What:** `bastionsupply doctor --policy <file>` (warn when a policy_version 2 file meets agentbastion < 0.12 or bastiongate < 0.8, which ignore `detectors:`), and document the v2 contract in `bastioncorpus/CONTRACTS.md`.
-
-**Why:** Old installs can't be fixed retroactively; the doctor check is how an operator finds out a kill switch won't apply. CONTRACTS.md is where the suite's shared formats are written down.
-
-**Context:** Gate side of A2 shipped in 0.8.0 (see Completed). Design: `~/.gstack/projects/Varie/stefano-bastion-release-design-20260927-232415.md` (D-A1, A2). The v2 golden is byte-identical in agentbastion and bastiongate (`tests/fixtures/policy_v2_golden.yaml`).
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** bastiongate 0.8.0 released.
-
 ## Completed
+
+### A2 follow-ups outside this repo (done)
+
+**What:** `bastionsupply doctor --policy <file>` warns when a policy_version 2 file meets agentbastion < 0.12 or bastiongate < 0.8 (which ignore `detectors:` / the `gate:` block); the v2 contract is documented in `bastioncorpus/CONTRACTS.md`.
+
+**Shipped:** bastionsupply 0.7.0 (Rinkia/bastionsupply#8) and Rinkia/bastioncorpus#10. Remaining gap: no producer lock until `harden` emits v2.
 
 ### A2: adopt policy v2 + detector modes in bastiongate (done in 0.8.0)
 
