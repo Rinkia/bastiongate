@@ -4,6 +4,8 @@
 
 ### E2: runtime A2A gate (bastionmesh)
 
+**Status (2026-09-30):** moved to its own tool, [github.com/Rinkia/bastionmesh](https://github.com/Rinkia/bastionmesh) (v0.1.0 built, not yet on PyPI). Its follow-ups live in bastionmesh/TODOS.md. Kept here for history.
+
 **What:** Proxy A2A JSON-RPC (`message/send`, `tasks/*`) the way bastiongate proxies MCP: scan message parts for injection, apply allow/deny per peer agent, cap delegation depth and fan-out.
 
 **Why:** The L5 plan (2026-09-29) covers A2A cards statically (bastionsupply) and multi-agent runs forensically (bastiontrace), but nothing enforces inline between agents (OWASP ASI07/ASI08).
