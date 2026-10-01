@@ -83,7 +83,8 @@ def scan_encoded_text(text: str) -> Decision:
 
     findings = tuple(check_encoded_injection(Server("result", (Tool(name="_result", description=text),))))
     if findings:
-        return Decision(False, f"tool result hides an injection ({findings[0].message})", findings)
+        detail = findings[0].message.replace("Tool description", "The result", 1)
+        return Decision(False, f"tool result hides an injection ({detail})", findings)
     return Decision(True, "no encoded injection")
 
 
