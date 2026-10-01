@@ -197,10 +197,12 @@ class Gate:
                 out, flagged = self._scan_result(out, tool)
                 if "error" in out:  # injection blocked; nothing left to scrub
                     return out
-                if not flagged:
-                    out, flagged = self._scan_encoded(out, tool)
-                    if "error" in out:
-                        return out
+                # runs even when the plain scan already flagged (warn mode): one plain
+                # trigger phrase must not exempt an encoded payload from on_encoded_result
+                out, encoded_flagged = self._scan_encoded(out, tool)
+                if "error" in out:
+                    return out
+                flagged = flagged or encoded_flagged
             if self.policy.opt(tool or "", "scrub_results"):
                 out = self._scrub_result(out, tool)
             if self.policy.scan_flows and isinstance(out.get("result"), dict):
@@ -241,7 +243,10 @@ class Gate:
         if not tools:
             return msg
         encoded = guards.encoded_findings(tools)
-        if encoded:  # warn only: a decoded payload in a tool definition is reported, never dropped (yet)
+        if encoded is None:
+            self.trace.emit("tools_list_encoded_skipped", count=len(tools))
+            self._bump("encoded_scan_skipped")
+        elif encoded:  # warn only: a decoded payload in a tool definition is reported, never dropped (yet)
             self.trace.emit("tools_list_encoded", tools=sorted(encoded))
             self._bump("tools_encoded_warned")
             self._warn(f"bastiongate: WARN tool definition(s) hide an encoded injection: {', '.join(sorted(encoded))}")

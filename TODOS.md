@@ -2,6 +2,18 @@
 
 ## Open
 
+### Scan `resource` content blocks
+
+**What:** include embedded `resource` blocks (`{"type": "resource", "resource": {"text": ...}}`) in the text the gate scans for results: the plain injection scan, the encoded scan, the PII scrub and flow-guard taint.
+
+**Why:** `jsonrpc.result_text` reads only `type: text` blocks, so an injection, plain or encoded, inside a resource block reaches the agent unscanned. The 2026-10-01 integration review confirmed it: a base64 payload in a resource block passed with `on_encoded_result: block`.
+
+**Context:** this predates the encoded work, which inherits the gap. Fixing it changes plain-injection behaviour (more results scanned, so possibly more blocks), so it needs its own release note and shadow consideration. Start in `jsonrpc.result_text` and `_scrub_result`.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** none.
+
 ### Whole-text decode views in the runtime scanners
 
 **What:** run the rot13 / leet / reversed / spaced-letter views (`bastioncorpus.variants(text, transforms=True)`) on tool results in the gate and on replies in bastionmesh, not only in agentbastion's input guard.
