@@ -14,6 +14,26 @@
 **Priority:** P2
 **Depends on:** none.
 
+### Decoder cost on big encoded content
+
+**What:** speed up `bastioncorpus.variants` on large encoded runs, or cap decode input lower on the runtime path.
+
+**Why:** the 2026-10-01 re-review measured the remaining per-message costs, from the single decode each path still pays:
+- 1 MB of base64 costs about 1.4 s in the gate's encoded scan and 1.7 to 5 s per piece in the mesh;
+- agentbastion in shadow takes about 5.5 s on that same 1 MB, against 1.4 s with the detector off;
+- `poisoned_tool_names`, the plain scan, which predates this work, is slightly superlinear: 6 s at 20 MB, with no size cap.
+
+Typical messages (KBs) cost about 1 ms.
+
+**Context:** the redundant decodes are already gone, so this is the floor of one decode. Options:
+- one combined pass over the text instead of 13 regex passes;
+- lower caps on the hot path (fail closed under block);
+- a size cap on `tools/list` definitions for the plain scan.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** none.
+
 ### Whole-text decode views in the runtime scanners
 
 **What:** run the rot13 / leet / reversed / spaced-letter views (`bastioncorpus.variants(text, transforms=True)`) on tool results in the gate and on replies in bastionmesh, not only in agentbastion's input guard.

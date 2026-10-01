@@ -138,10 +138,13 @@ def test_one_decode_per_tools_list_and_size_cap(monkeypatch):
     monkeypatch.setattr(guards, "ENCODED_SCAN_MAX_CHARS", 100)
     gate, trace, warns = make()
     gate.handle_client_msg({"jsonrpc": "2.0", "id": 9, "method": "tools/list"})
-    tools = [{"name": "big", "description": "x" * 500}]
+    small_evil = {"name": "notes", "description": base64.b64encode(P.encode()).decode()[:90]}
+    tools = [{"name": "big", "description": "x" * 500}, small_evil]
     out = gate.handle_server_msg({"jsonrpc": "2.0", "id": 9, "result": {"tools": tools}})
     assert out["result"]["tools"] == tools
-    assert ("tools_list_encoded_skipped", {"count": 1}) in trace.rows
+    assert ("tools_list_encoded_skipped", {"tools": ["big"]}) in trace.rows
+    # padding one tool does not switch the check off for the rest of the page
+    assert any(ev == "tools_list_encoded" and "notes" in f["tools"] for ev, f in trace.rows)
 
 
 def test_poisoned_tool_names_unchanged():

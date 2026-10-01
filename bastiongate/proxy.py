@@ -242,11 +242,11 @@ class Gate:
         tools = jsonrpc.tools_from_list_result(msg)
         if not tools:
             return msg
-        encoded = guards.encoded_findings(tools)
-        if encoded is None:
-            self.trace.emit("tools_list_encoded_skipped", count=len(tools))
+        encoded, skipped = guards.encoded_findings(tools)
+        if skipped:
+            self.trace.emit("tools_list_encoded_skipped", tools=sorted(skipped))
             self._bump("encoded_scan_skipped")
-        elif encoded:  # warn only: a decoded payload in a tool definition is reported, never dropped (yet)
+        if encoded:  # warn only: a decoded payload in a tool definition is reported, never dropped (yet)
             self.trace.emit("tools_list_encoded", tools=sorted(encoded))
             self._bump("tools_encoded_warned")
             self._warn(f"bastiongate: WARN tool definition(s) hide an encoded injection: {', '.join(sorted(encoded))}")

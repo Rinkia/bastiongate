@@ -78,18 +78,21 @@ def poisoned_tool_names(tools: list[dict]) -> set[str]:
 ENCODED_SCAN_MAX_CHARS = 1_000_000
 
 
-def encoded_findings(tools: list[dict]) -> dict[str, tuple] | None:
-    """{tool_name: encoded-injection findings} for a tools/list page, or None when the
-    page is too large to decode (more than ENCODED_SCAN_MAX_CHARS of definitions)."""
+def encoded_findings(tools: list[dict]) -> tuple[dict[str, tuple], list[str]]:
+    """({tool_name: encoded-injection findings}, [names skipped]) for a tools/list page.
+    The size cap is per tool definition: padding one tool cannot switch the check off
+    for the others on the page."""
     from bastionsupply.checks import check_encoded_injection
 
-    size = sum(len(str(t.get("description", ""))) + len(str(t.get("inputSchema") or "")) for t in tools)
-    if size > ENCODED_SCAN_MAX_CHARS:
-        return None
+    def size(t: dict) -> int:
+        return len(str(t.get("description", ""))) + len(str(t.get("inputSchema") or ""))
+
+    eligible = [t for t in tools if size(t) <= ENCODED_SCAN_MAX_CHARS]
+    skipped = [str(t.get("name", "")) for t in tools if size(t) > ENCODED_SCAN_MAX_CHARS]
     by_tool: dict[str, list] = {}
-    for f in check_encoded_injection(_as_server(tools)):
+    for f in check_encoded_injection(_as_server(eligible)):
         by_tool.setdefault(f.tool, []).append(f)
-    return {k: tuple(v) for k, v in by_tool.items()}
+    return {k: tuple(v) for k, v in by_tool.items()}, skipped
 
 
 def scan_encoded_text(text: str, views=None) -> Decision:
