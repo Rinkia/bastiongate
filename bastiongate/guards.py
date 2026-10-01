@@ -61,6 +61,32 @@ def poisoned_tool_names(tools: list[dict]) -> set[str]:
     return bad
 
 
+# Decoding is linear but not free (~0.2-2 s per MB): bigger results are not decoded
+# (and fail closed when on_encoded_result is block, see proxy._scan_encoded).
+ENCODED_SCAN_MAX_CHARS = 1_000_000
+
+
+def encoded_findings(tools: list[dict]) -> dict[str, tuple]:
+    """{tool_name: encoded-injection findings} for a tools/list page."""
+    return {name: tuple(f for f in found if f.check == "encoded-injection")
+            for name, found in scan_tools_list(tools).items()
+            if any(f.check == "encoded-injection" for f in found)}
+
+
+def scan_encoded_text(text: str) -> Decision:
+    """A tool result whose ENCODED content (base64, hex, binary, ...) carries an
+    injection (bastionsupply's encoded-injection check). Separate from
+    scan_result_text so the gate can act on it under its own knob."""
+    if not text:
+        return Decision(True, "empty result")
+    from bastionsupply.checks import check_encoded_injection
+
+    findings = tuple(check_encoded_injection(Server("result", (Tool(name="_result", description=text),))))
+    if findings:
+        return Decision(False, f"tool result hides an injection ({findings[0].message})", findings)
+    return Decision(True, "no encoded injection")
+
+
 def scan_result_text(text: str) -> Decision:
     """Scan a tool-call result body for injection."""
     if not text:

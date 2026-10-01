@@ -27,6 +27,7 @@ BLOCK_RESULT_CODE = -32002
 BLOCK_ARG_CODE = -32003
 BLOCK_RESULT_PII_CODE = -32004
 BLOCK_FLOW_CODE = -32005
+BLOCK_ENCODED_CODE = -32006
 
 # in-flight correlation bounds (per session, so one busy/abusive session can't
 # evict another's entries)
@@ -196,6 +197,10 @@ class Gate:
                 out, flagged = self._scan_result(out, tool)
                 if "error" in out:  # injection blocked; nothing left to scrub
                     return out
+                if not flagged:
+                    out, flagged = self._scan_encoded(out, tool)
+                    if "error" in out:
+                        return out
             if self.policy.opt(tool or "", "scrub_results"):
                 out = self._scrub_result(out, tool)
             if self.policy.scan_flows and isinstance(out.get("result"), dict):
@@ -235,6 +240,11 @@ class Gate:
         tools = jsonrpc.tools_from_list_result(msg)
         if not tools:
             return msg
+        encoded = guards.encoded_findings(tools)
+        if encoded:  # warn only: a decoded payload in a tool definition is reported, never dropped (yet)
+            self.trace.emit("tools_list_encoded", tools=sorted(encoded))
+            self._bump("tools_encoded_warned")
+            self._warn(f"bastiongate: WARN tool definition(s) hide an encoded injection: {', '.join(sorted(encoded))}")
         bad = guards.poisoned_tool_names(tools)
         if not bad:
             self.trace.emit("tools_list_scanned", count=len(tools), poisoned=0)
@@ -249,6 +259,39 @@ class Gate:
         new_result["tools"] = kept
         new["result"] = new_result
         return new
+
+    def _scan_encoded(self, msg: dict, tool: str | None) -> tuple[dict, bool]:
+        """Encoded injection in a result (base64/hex/binary...): warn (default) or
+        block per on_encoded_result. A result too big to decode is never silently
+        passed under `block`: it fails closed."""
+        text = jsonrpc.result_text(msg)
+        result = msg.get("result")
+        if isinstance(result, dict) and result.get("structuredContent") is not None:
+            text = f"{text}\n{json.dumps(result['structuredContent'])}"
+        action = self.policy.opt(tool or "", "on_encoded_result")
+        if len(text) > guards.ENCODED_SCAN_MAX_CHARS:
+            self.trace.emit("encoded_scan_skipped", id=msg.get("id"), tool=tool, chars=len(text), action=action)
+            self._bump("encoded_scan_skipped")
+            if action == BLOCK:
+                return jsonrpc.error_response(
+                    msg.get("id"), BLOCK_ENCODED_CODE,
+                    f"bastiongate blocked tool result: {len(text)} characters is too large to check for "
+                    f"encoded injection (limit {guards.ENCODED_SCAN_MAX_CHARS}); on_encoded_result is block",
+                ), False
+            return msg, False
+        decision = guards.scan_encoded_text(text)
+        if decision.allowed:
+            return msg, False
+        self.trace.emit("encoded_injection", id=msg.get("id"), tool=tool, action=action,
+                        checks=sorted({f.check for f in decision.findings}))
+        if action == BLOCK:
+            self._bump("encoded_injection_blocked")
+            return jsonrpc.error_response(msg.get("id"), BLOCK_ENCODED_CODE,
+                                          f"bastiongate blocked tool result: {decision.reason}"), False
+        self._bump("encoded_injection_warned")
+        self._warn(f"bastiongate: WARN encoded injection in result of {tool}: {decision.reason} "
+                   "- set on_encoded_result: block to stop it")
+        return msg, True  # forwarded in warn mode: the agent reads flagged content (taints the session)
 
     def _scan_result(self, msg: dict, tool: str | None) -> tuple[dict, bool]:
         text = jsonrpc.result_text(msg)

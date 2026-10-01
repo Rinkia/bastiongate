@@ -2,6 +2,18 @@
 
 ## Open
 
+### Whole-text decode views in the runtime scanners
+
+**What:** run the rot13 / leet / reversed / spaced-letter views (`bastioncorpus.variants(text, transforms=True)`) on tool results in the gate and on replies in bastionmesh, not only in agentbastion's input guard.
+
+**Why:** v0.10 decodes encoded runs only (base64, hex, binary...), so a rot13 or reversed payload planted in a web page passes the gate. encoding-bench (2026-10-01): supply/gate catch about 1% of rot13/leet/reversed rows, against 88% for the run-based encodings.
+
+**Context:** deferred by D3 of the encoded-payload eng review (`bastion-decode-DESIGN.md`): whole-text views multiply the scan work on every result and add false-positive surface. Decide with encoding-bench numbers on cost per result, extra catches and benign FP rate. Start in `guards.scan_encoded_text`.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** bastioncorpus 0.5 + bastionprobe encoding-bench (both done).
+
 ### E2: runtime A2A gate (bastionmesh)
 
 **Status (2026-09-30):** moved to its own tool, [github.com/Rinkia/bastionmesh](https://github.com/Rinkia/bastionmesh) (v0.1.0 built, not yet on PyPI). Its follow-ups live in bastionmesh/TODOS.md. Kept here for history.

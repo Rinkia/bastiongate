@@ -46,6 +46,8 @@ class GatePolicy:
     # flow guard (flows.py): untrusted + private read in one session, then egress
     scan_flows: bool = True  # track session taint and check egress calls
     on_tainted_egress: str = WARN  # warn (shadow, default) | block (-32005)
+    # encoded injection in tool results (base64/hex/binary... decoded by bastioncorpus)
+    on_encoded_result: str = WARN  # warn (shadow, default) | block (-32006)
     label_packs: bool = True  # built-in labels for common servers (github, fetch, ...)
 
     # per-tool knob overrides: {tool_name: {knob: value}}; `labels` sets flow labels
@@ -58,7 +60,7 @@ class GatePolicy:
 
     # knobs that a per-tool override may set
     _OVERRIDABLE = ("scrub_args", "on_pii_arg", "scan_results", "on_injected_result",
-                    "scrub_results", "on_pii_result", "on_tainted_egress")
+                    "scrub_results", "on_pii_result", "on_tainted_egress", "on_encoded_result")
 
     def tool_allowed(self, name: str) -> bool:
         if name in self.deny:
@@ -122,10 +124,11 @@ _CHOICE_KNOBS = {
     "on_pii_arg": (REDACT, BLOCK, WARN),
     "on_pii_result": (REDACT, BLOCK, WARN),
     "on_tainted_egress": (WARN, BLOCK),
+    "on_encoded_result": (WARN, BLOCK),
     "result_inspector": ("static", "agentbastion"),
     "inspector_fail": ("closed", "open"),
 }
-_FLOW_KNOBS = ("scan_flows", "on_tainted_egress", "label_packs")
+_FLOW_KNOBS = ("scan_flows", "on_tainted_egress", "label_packs", "on_encoded_result")
 _GATE_KNOBS = frozenset(_BOOL_KNOBS) | frozenset(_CHOICE_KNOBS) | {"tools"}
 _MODES = ("off", "shadow", "enforce")
 _INSPECTOR_NAMESPACES = ("bastion.", "custom.")  # run by agentbastion deep-inspect
@@ -273,8 +276,9 @@ def _from_v1(obj: dict) -> GatePolicy:
             # a string `labels: "egress"` must never be iterated character by character
             if "labels" in override:
                 _check_labels(override["labels"], f"tools.{tool}")
-            if "on_tainted_egress" in override:
-                _check_knob("on_tainted_egress", override["on_tainted_egress"], f"tools.{tool}")
+            for knob in ("on_tainted_egress", "on_encoded_result"):
+                if knob in override:
+                    _check_knob(knob, override[knob], f"tools.{tool}")
     return GatePolicy(
         default=obj.get("default", "allow"),
         allow=frozenset(obj.get("allow", []) or []),
@@ -293,6 +297,7 @@ def _from_v1(obj: dict) -> GatePolicy:
         inspector_semantic=obj.get("inspector_semantic", False),
         scan_flows=obj.get("scan_flows", True),
         on_tainted_egress=obj.get("on_tainted_egress", WARN),
+        on_encoded_result=obj.get("on_encoded_result", WARN),
         label_packs=obj.get("label_packs", True),
         tools=tools,
     )

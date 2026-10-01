@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.10.0 (unreleased)
+
+- **Encoded injection in tool results.** Results are decoded with bastioncorpus (base64,
+  base32, hex, binary, ascii85/base85, Morse, percent and `\u` escapes) and scanned with
+  bastionsupply's `encoded-injection` check.
+  - New setting `on_encoded_result: warn | block`, **default `warn`** (shadow). Per-tool
+    overrides work.
+  - `warn` forwards the result, logs an `encoded_injection` trace event and a stderr WARN, and
+    taints the session for the flow guard.
+  - `block` returns error -32006.
+  - A result over 1,000,000 characters is not decoded (event `encoded_scan_skipped`); under
+    `block` it fails closed.
+- **tools/list:** a tool definition hiding an encoded injection is warned about
+  (`tools_list_encoded`), not dropped.
+- Plain injections keep their own path and code (-32002). Clean results are unchanged.
+- Evidence (`bastionprobe encoding-bench`, 2026-10-01): bastionsupply's scan, which gate
+  reuses, catches 88% of base64/hex/binary/base32/ascii85/base85/percent/escape-encoded
+  corpus attacks (about 1% before), with 0% benign false positives.
+- Requires bastionsupply >= 0.11.0. `bastionsupply doctor` warns when a v1 policy sets
+  `on_encoded_result` but the installed gate is older than 0.10.
+
 ## 0.9.0
 
 - **Flow guard (lethal trifecta).** A per-session taint record catches an egress

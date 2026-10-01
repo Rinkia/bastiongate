@@ -205,6 +205,32 @@ tools:
 Older gates silently ignore these keys: `bastionsupply doctor --policy policy.yaml`
 warns when bastiongateway < 0.9 would read them.
 
+### Encoded injection in results (`on_encoded_result`)
+
+A payload hidden in base64, hex, binary, base32, ascii85/base85, Morse or escapes reads as
+noise to a text filter but plainly to the model. The gate decodes each tool result
+(bastioncorpus `variants`) and runs bastionsupply's `encoded-injection` check on the decoded
+views.
+
+```yaml
+on_encoded_result: warn      # warn (default, shadow) | block (-32006)
+tools:
+  fetch: {on_encoded_result: block}
+```
+
+- `warn` forwards the result, logs `encoded_injection`, prints a WARN line, and counts the
+  result as untrusted for the flow guard.
+- `block` replaces it with error -32006.
+- Encoded injections in `tools/list` definitions are warned about, never dropped.
+
+**Limits:**
+- Results over 1,000,000 characters are not decoded. They are refused under `block`, and only
+  logged (`encoded_scan_skipped`) under `warn`.
+- rot13, leetspeak and reversed text are decoded only by agentbastion's input guard
+  (TODOS.md).
+- Made-up ciphers can't be decoded by enumeration. Tool allow/deny lists and the flow guard
+  are the controls encoding cannot bypass.
+
 ### Argument PII/secret scrub
 
 On every `tools/call` the gate scans the arguments the agent is about to send
