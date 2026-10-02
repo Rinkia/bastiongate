@@ -2,18 +2,6 @@
 
 ## Open
 
-### Scan `resource` content blocks
-
-**What:** include embedded `resource` blocks (`{"type": "resource", "resource": {"text": ...}}`) in the text the gate scans for results: the plain injection scan, the encoded scan, the PII scrub and flow-guard taint.
-
-**Why:** `jsonrpc.result_text` reads only `type: text` blocks, so an injection, plain or encoded, inside a resource block reaches the agent unscanned. The 2026-10-01 integration review confirmed it: a base64 payload in a resource block passed with `on_encoded_result: block`.
-
-**Context:** this predates the encoded work, which inherits the gap. Fixing it changes plain-injection behaviour (more results scanned, so possibly more blocks), so it needs its own release note and shadow consideration. Start in `jsonrpc.result_text` and `_scrub_result`.
-
-**Effort:** S
-**Priority:** P2
-**Depends on:** none.
-
 ### Decoder cost on big encoded content
 
 **What:** speed up `bastioncorpus.variants` on large encoded runs, or cap decode input lower on the runtime path.
@@ -81,6 +69,10 @@ Typical messages (KBs) cost about 1 ms.
 
 
 ## Completed
+
+### Scan `resource` content blocks (done in 0.10.0)
+
+Embedded resources, resource links and `resources/read` responses go through every result check; `scan_resources: false` is the kill switch. Design: `../gate-gaps-DESIGN.md` G1.
 
 ### A2 follow-ups outside this repo (done)
 

@@ -28,6 +28,7 @@ BLOCK_ARG_CODE = -32003
 BLOCK_RESULT_PII_CODE = -32004
 BLOCK_FLOW_CODE = -32005
 BLOCK_ENCODED_CODE = -32006
+RESOURCES_READ = "resources/read"  # scanned like a tool result, under this pseudo tool name
 
 # in-flight correlation bounds (per session, so one busy/abusive session can't
 # evict another's entries)
@@ -100,6 +101,8 @@ class Gate:
             self.trace.emit("tool_call", id=msg.get("id"), tool=name)
         elif method == "tools/list":
             self._remember(session, msg.get("id"), "tools/list", None)
+        elif method == RESOURCES_READ:
+            self._remember(session, msg.get("id"), RESOURCES_READ, RESOURCES_READ)
         return msg, None
 
     def _scrub_args(self, msg: dict, name: str) -> tuple[dict | None, dict | None]:
@@ -191,7 +194,9 @@ class Gate:
         if method == "tools/list":
             self._learn_labels(msg)
             return self._filter_tools(msg) if self.policy.scan_tools else msg
-        if method == "tools/call":
+        if method in ("tools/call", RESOURCES_READ):
+            if method == RESOURCES_READ and not self.policy.opt(tool, "scan_resources"):
+                return msg  # kill switch: resources/read passes as in 0.9
             out, flagged = msg, False
             if self.policy.opt(tool or "", "scan_results"):
                 out, flagged = self._scan_result(out, tool)
@@ -226,10 +231,7 @@ class Gate:
     def _record_taint(self, out: dict, tool: str, repo, flagged: bool, session) -> None:
         """Taint from what the agent will actually read: the forwarded result."""
         labels, _source = self.labels.lookup(tool, self.policy)
-        text = jsonrpc.result_text(out)
-        structured = out["result"].get("structuredContent")
-        if structured is not None:
-            text = f"{text}\n{json.dumps(structured)}"
+        text = self._text_for_scan(out, tool)
         _red, kinds = pii.scrub_text(text)
         self.flows.record_result(
             session, tool, repo,
@@ -269,10 +271,7 @@ class Gate:
         """Encoded injection in a result (base64/hex/binary...): warn (default) or
         block per on_encoded_result. A result too big to decode is never silently
         passed under `block`: it fails closed."""
-        text = jsonrpc.result_text(msg)
-        result = msg.get("result")
-        if isinstance(result, dict) and result.get("structuredContent") is not None:
-            text = f"{text}\n{json.dumps(result['structuredContent'])}"
+        text = self._text_for_scan(msg, tool)
         action = self.policy.opt(tool or "", "on_encoded_result")
         if len(text) > guards.ENCODED_SCAN_MAX_CHARS:
             self.trace.emit("encoded_scan_skipped", id=msg.get("id"), tool=tool, chars=len(text), action=action)
@@ -299,12 +298,7 @@ class Gate:
         return msg, True  # forwarded in warn mode: the agent reads flagged content (taints the session)
 
     def _scan_result(self, msg: dict, tool: str | None) -> tuple[dict, bool]:
-        text = jsonrpc.result_text(msg)
-        # also scan structuredContent — an injection can hide in structured JSON,
-        # not just in text blocks
-        result = msg.get("result")
-        if isinstance(result, dict) and result.get("structuredContent") is not None:
-            text = f"{text}\n{json.dumps(result['structuredContent'])}"
+        text = self._text_for_scan(msg, tool)
         decision = self._inspect(text)
         if decision.allowed:
             return msg, False
@@ -318,6 +312,16 @@ class Gate:
             f"bastiongate blocked tool result: {decision.reason}",
         ), False
 
+    def _text_for_scan(self, msg: dict, tool: str | None) -> str:
+        """What the agent will read from a result: text blocks, resources (unless the
+        scan_resources kill switch is off) and structuredContent, which can also hide
+        an injection."""
+        text = jsonrpc.result_text(msg, resources=self.policy.opt(tool or "", "scan_resources"))
+        result = msg.get("result")
+        if isinstance(result, dict) and result.get("structuredContent") is not None:
+            text = f"{text}\n{json.dumps(result['structuredContent'])}"
+        return text
+
     def _scrub_result(self, msg: dict, tool: str | None) -> dict:
         """Redact/block secrets a tool RETURNS — in text content blocks AND in
         the result's structuredContent."""
@@ -326,6 +330,16 @@ class Gate:
             return msg
         kinds: list[str] = []
         new_result = dict(result)
+
+        resources = self.policy.opt(tool or "", "scan_resources")
+
+        def scrub_res(res):  # resource.text only; blobs are never rewritten (README Limits)
+            if resources and isinstance(res, dict) and isinstance(res.get("text"), str):
+                red, found = pii.scrub_text(res["text"])
+                if found:
+                    kinds.extend(found)
+                    return {**res, "text": red}
+            return res
 
         blocks = result.get("content")
         if isinstance(blocks, list):
@@ -336,8 +350,15 @@ class Gate:
                     if found:
                         kinds.extend(found)
                         b = {**b, "text": red}
+                elif isinstance(b, dict) and b.get("type") == "resource":
+                    res = scrub_res(b.get("resource"))
+                    if res is not b.get("resource"):
+                        b = {**b, "resource": res}
                 new_blocks.append(b)
             new_result["content"] = new_blocks
+        contents = result.get("contents")
+        if isinstance(contents, list):
+            new_result["contents"] = [scrub_res(c) for c in contents]
 
         structured = result.get("structuredContent")
         if structured is not None:

@@ -6,6 +6,8 @@ and classify a message so the proxy can route it.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from typing import IO, Iterator
 
@@ -49,15 +51,65 @@ def error_response(mid, code: int, message: str, data=None) -> dict:
     return {"jsonrpc": "2.0", "id": mid, "error": err}
 
 
-# tool-call results carry content blocks; pull their text out for scanning
-def result_text(msg: dict) -> str:
+_TEXT_MIME_MARKERS = ("json", "xml", "yaml", "javascript")
+
+
+def _is_text_mime(mime) -> bool:
+    mime = str(mime or "").lower()
+    return mime.startswith("text/") or any(m in mime for m in _TEXT_MIME_MARKERS)
+
+
+def resource_texts(res) -> list[str]:
+    """Text a model can read from one resource (an embedded `resource` or a
+    `resources/read` contents entry): `text`, and `blob` decoded when its MIME type
+    is text-like. Other blobs are returned raw for the encoded scan's decoder."""
+    if not isinstance(res, dict):
+        return []
+    out = []
+    if isinstance(res.get("text"), str):
+        out.append(res["text"])
+    blob = res.get("blob")
+    if isinstance(blob, str) and blob:
+        if _is_text_mime(res.get("mimeType")):
+            try:
+                out.append(base64.b64decode(blob, validate=False).decode("utf-8", "replace"))
+            except (binascii.Error, ValueError):
+                out.append(blob)
+        else:
+            out.append(blob)
+    return out
+
+
+def _block_texts(block, resources: bool) -> list[str]:
+    if not isinstance(block, dict):
+        return []
+    kind = block.get("type")
+    if kind == "text":
+        return [str(block.get("text", ""))]
+    if not resources:
+        return []
+    if kind == "resource":
+        return resource_texts(block.get("resource"))
+    if kind == "resource_link":  # name/title/description reach the model
+        return [str(block[k]) for k in ("name", "title", "description") if isinstance(block.get(k), str)]
+    return []
+
+
+def result_text(msg: dict, *, resources: bool = True) -> str:
+    """Every piece of text the model can read from a tools/call or resources/read
+    result: text blocks and, with `resources`, embedded resources, resource links and
+    `contents[]`. The one place every result scanner reads from."""
     result = msg.get("result")
     if not isinstance(result, dict):
         return ""
     parts = []
-    for block in result.get("content", []) or []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            parts.append(str(block.get("text", "")))
+    blocks = result.get("content")
+    for block in blocks if isinstance(blocks, list) else []:
+        parts.extend(_block_texts(block, resources))
+    contents = result.get("contents")
+    if resources and isinstance(contents, list):
+        for res in contents:
+            parts.extend(resource_texts(res))
     return "\n".join(parts)
 
 

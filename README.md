@@ -195,7 +195,7 @@ tools:
 - a tool with no label is never treated as egress, and auto labels need a
   `tools/list` first (packs and policy labels apply immediately);
 - a private read counts only from its labelled tool or a credential-shaped secret
-  in a forwarded **text** block (not embedded `resource` blocks); an injection
+  in the forwarded result (text, resource and `resources/read` content); an injection
   inside a private read counts as untrusted only if the result inspector flags it;
 - the very first egress call is checked before its own result taints the session,
   so exfiltration needs untrusted and private reads to have happened earlier;
@@ -230,6 +230,28 @@ tools:
   (TODOS.md).
 - Made-up ciphers can't be decoded by enumeration. Tool allow/deny lists and the flow guard
   are the controls encoding cannot bypass.
+
+### Resource content (`scan_resources`)
+
+Since 0.10 every result check reads all the text the model can see, not only `text` blocks:
+- embedded `resource` blocks (`resource.text`, and `resource.blob` base64-decoded when its MIME
+  type is text-like: `text/*`, JSON, XML, YAML, JavaScript);
+- `resource_link` blocks (`name`, `title`, `description`);
+- `resources/read` responses (`contents[]`), checked under the pseudo tool name
+  `resources/read`.
+
+The plain injection scan (-32002), the encoded scan (-32006), the PII scrub and the flow-guard
+taint all see this text. Clean resources are forwarded unchanged.
+
+```yaml
+scan_resources: true           # default; false = the 0.9 behaviour (text blocks only)
+tools:
+  resources/read: {on_injected_result: warn}
+```
+
+**Limits:** blobs with a non-text MIME type are not decoded as text (the encoded scan still
+decodes base64 runs inside them); the PII scrub redacts `resource.text` but never rewrites a
+blob; `prompts/get` messages are not scanned.
 
 ### Argument PII/secret scrub
 

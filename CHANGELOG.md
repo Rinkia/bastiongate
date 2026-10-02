@@ -2,6 +2,13 @@
 
 ## 0.10.0 (unreleased)
 
+- **BEHAVIOR: resource content is scanned.** Embedded `resource` blocks (text, and text-MIME
+  blobs decoded), `resource_link` name/title/description, and `resources/read` responses now
+  go through the same result checks as text blocks: plain injection (-32002, blocks by
+  default), encoded injection, PII scrub and flow-guard taint. Before 0.10 an injection in a
+  resource reached the agent unscanned. Clean resources are forwarded unchanged. Kill switch:
+  `scan_resources: false` (global or per tool; `resources/read` is the pseudo tool name for
+  resource reads).
 - **Encoded injection in tool results.** Results are decoded with bastioncorpus (base64,
   base32, hex, binary, ascii85/base85, Morse, percent and `\u` escapes) and scanned with
   bastionsupply's `encoded-injection` check.
