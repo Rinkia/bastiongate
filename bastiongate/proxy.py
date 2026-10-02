@@ -27,6 +27,9 @@ BLOCK_RESULT_CODE = -32002
 BLOCK_ARG_CODE = -32003
 BLOCK_RESULT_PII_CODE = -32004
 BLOCK_FLOW_CODE = -32005
+BLOCK_ENCODED_CODE = -32006
+RESOURCES_READ = "resources/read"  # scanned like a tool result, under this pseudo tool name
+UNMATCHED = "(unmatched)"  # pseudo tool name: a response with no pending request (late, duplicate, unknown id)
 
 # in-flight correlation bounds (per session, so one busy/abusive session can't
 # evict another's entries)
@@ -80,6 +83,7 @@ class Gate:
         method = jsonrpc.method_of(msg)
         if method == "initialize":
             self.flows.reset(session)  # a new MCP session starts with clean taint
+            self._remember(session, msg.get("id"), "initialize", None)
         elif method == "tools/call":
             name = (msg.get("params") or {}).get("name", "")
             decision = guards.check_tool_call(name, self.policy)
@@ -99,6 +103,8 @@ class Gate:
             self.trace.emit("tool_call", id=msg.get("id"), tool=name)
         elif method == "tools/list":
             self._remember(session, msg.get("id"), "tools/list", None)
+        elif method == RESOURCES_READ:
+            self._remember(session, msg.get("id"), RESOURCES_READ, RESOURCES_READ)
         return msg, None
 
     def _scrub_args(self, msg: dict, name: str) -> tuple[dict | None, dict | None]:
@@ -182,26 +188,77 @@ class Gate:
 
     # --- server -> agent -----------------------------------------------------
     def handle_server_msg(self, msg: dict, session=None) -> dict | None:
-        """Return the (possibly replaced/filtered) message to forward to the agent."""
+        """Return the (possibly replaced/filtered) message to forward to the agent.
+        A message the gate cannot inspect (malformed beyond what the checks expect)
+        is replaced by an error: it never crashes the proxy and is never forwarded."""
         if not jsonrpc.is_response(msg):
             return msg
-        method, tool, repo = self._recall(session, msg.get("id"))
+        try:
+            return self._handle_response(msg, session)
+        except Exception as e:  # noqa: BLE001 - fail closed on anything unexpected
+            self.trace.emit("response_uninspectable", id=msg.get("id"), reason=type(e).__name__)
+            self._bump("response_uninspectable")
+            return jsonrpc.error_response(msg.get("id"), BLOCK_RESULT_CODE,
+                                          f"bastiongate blocked a response it could not inspect ({type(e).__name__})")
 
+    def _handle_response(self, msg: dict, session) -> dict:
+        method, tool, repo = self._recall(session, msg.get("id"))
+        if method is None:  # late (past PENDING_TTL), duplicate or unknown id: never forward unscanned
+            if jsonrpc.tools_from_list_result(msg):
+                method = "tools/list"
+            elif _carries_content(msg):
+                method, tool = "tools/call", UNMATCHED
+                self.trace.emit("response_unmatched", id=msg.get("id"))
+                self._bump("response_unmatched")
+
+        if method == "initialize":
+            return self._check_instructions(msg)
         if method == "tools/list":
             self._learn_labels(msg)
             return self._filter_tools(msg) if self.policy.scan_tools else msg
-        if method == "tools/call":
+        if method in ("tools/call", RESOURCES_READ):
+            if method == RESOURCES_READ and not self.policy.opt(tool, "scan_resources"):
+                return msg  # kill switch: resources/read passes as in 0.9
             out, flagged = msg, False
             if self.policy.opt(tool or "", "scan_results"):
                 out, flagged = self._scan_result(out, tool)
-                if "error" in out:  # injection blocked; nothing left to scrub
+                if out is not msg:  # the gate blocked it; nothing left to scrub
                     return out
+                # runs even when the plain scan already flagged (warn mode): one plain
+                # trigger phrase must not exempt an encoded payload from on_encoded_result
+                out, encoded_flagged = self._scan_encoded(out, tool)
+                if out is not msg:
+                    return out
+                flagged = flagged or encoded_flagged
             if self.policy.opt(tool or "", "scrub_results"):
                 out = self._scrub_result(out, tool)
-            if self.policy.scan_flows and isinstance(out.get("result"), dict):
+            if self.policy.scan_flows:
                 self._record_taint(out, tool or "", repo, flagged, session)
             return out
         return msg
+
+    def _check_instructions(self, msg: dict) -> dict:
+        """initialize.result.instructions (and serverInfo) reach the model, often in the
+        system prompt: scanned like a tool definition. A poisoned one is removed (under
+        on_poisoned_tool: block), the way a poisoned tool is dropped from a listing."""
+        result = msg.get("result")
+        if not self.policy.scan_tools or not isinstance(result, dict):
+            return msg
+        info = result.get("serverInfo") if isinstance(result.get("serverInfo"), dict) else {}
+        info_text = "\n".join(v for v in (info.get(k) for k in ("name", "title", "description")) if isinstance(v, str))
+        bad = {key: d.reason for key, text in (("instructions", result.get("instructions")), ("serverInfo", info_text))
+               if isinstance(text, str) and text and not (d := guards.scan_result_text(text)).allowed}
+        if not bad:
+            return msg
+        self.trace.emit("instructions_poisoned", id=msg.get("id"), fields=sorted(bad))
+        self._bump("instructions_poisoned")
+        if self.policy.on_poisoned_tool != BLOCK:
+            self._warn(f"bastiongate: WARN server {', '.join(sorted(bad))} carry an injection")
+            return msg
+        clean = {k: v for k, v in result.items() if k != "instructions" or "instructions" not in bad}
+        if "serverInfo" in bad:
+            clean["serverInfo"] = {"name": "upstream", "version": str(info.get("version", ""))}
+        return {**msg, "result": clean}
 
     def _learn_labels(self, msg: dict) -> None:
         tools = jsonrpc.tools_from_list_result(msg)
@@ -219,10 +276,7 @@ class Gate:
     def _record_taint(self, out: dict, tool: str, repo, flagged: bool, session) -> None:
         """Taint from what the agent will actually read: the forwarded result."""
         labels, _source = self.labels.lookup(tool, self.policy)
-        text = jsonrpc.result_text(out)
-        structured = out["result"].get("structuredContent")
-        if structured is not None:
-            text = f"{text}\n{json.dumps(structured)}"
+        text = self._text_for_scan(out, tool)
         _red, kinds = pii.scrub_text(text)
         self.flows.record_result(
             session, tool, repo,
@@ -235,28 +289,71 @@ class Gate:
         tools = jsonrpc.tools_from_list_result(msg)
         if not tools:
             return msg
+        encoded, skipped = guards.encoded_findings(tools)
+        if skipped:
+            self.trace.emit("tools_list_encoded_skipped", tools=sorted(skipped))
+            self._bump("encoded_scan_skipped")
+        if encoded:  # warn only: a decoded payload in a tool definition is reported, never dropped (yet)
+            self.trace.emit("tools_list_encoded", tools=sorted(encoded))
+            self._bump("tools_encoded_warned")
+            self._warn(f"bastiongate: WARN tool definition(s) hide an encoded injection: {', '.join(sorted(encoded))}")
         bad = guards.poisoned_tool_names(tools)
-        if not bad:
+        oversize = guards.oversize_tool_names(tools)
+        if oversize:  # too big to scan: fail closed, handled like a poisoned tool
+            self.trace.emit("tools_list_oversize", tools=sorted(oversize), limit=guards.TOOL_DEF_MAX_CHARS)
+            self._warn(f"bastiongate: WARN {len(oversize)} tool(s) too large to scan, handled as poisoned "
+                       f"(per tool {guards.TOOL_DEF_MAX_CHARS}, per page {guards.TOOLS_PAGE_MAX_CHARS} characters)")
+            bad = bad | oversize
+        if not bad and all(isinstance(t, dict) for t in tools):  # malformed entries: filtered below
             self.trace.emit("tools_list_scanned", count=len(tools), poisoned=0)
             return msg
         self.trace.emit("tools_list_scanned", count=len(tools), poisoned=len(bad), dropped=sorted(bad))
         self._bump("tools_dropped", len(bad))
         if self.policy.on_poisoned_tool != BLOCK:
             return msg
-        kept = [t for t in tools if t.get("name") not in bad]
+        kept = [t for t in tools if isinstance(t, dict) and t.get("name") not in bad]  # malformed: dropped
         new = dict(msg)
         new_result = dict(msg.get("result") or {})
         new_result["tools"] = kept
         new["result"] = new_result
         return new
 
+    def _scan_encoded(self, msg: dict, tool: str | None) -> tuple[dict, bool]:
+        """Encoded injection in a result (base64/hex/binary...): warn (default) or
+        block per on_encoded_result. A result too big to decode is never silently
+        passed under `block`: it fails closed."""
+        text = self._text_for_scan(msg, tool)
+        action = self.policy.opt(tool or "", "on_encoded_result")
+        if len(text) > guards.ENCODED_SCAN_MAX_CHARS:
+            self.trace.emit("encoded_scan_skipped", id=msg.get("id"), tool=tool, chars=len(text), action=action)
+            self._bump("encoded_scan_skipped")
+            if action == BLOCK:
+                return jsonrpc.error_response(
+                    msg.get("id"), BLOCK_ENCODED_CODE,
+                    f"bastiongate blocked tool result: {len(text)} characters is too large to check for "
+                    f"encoded injection (limit {guards.ENCODED_SCAN_MAX_CHARS}); on_encoded_result is block",
+                ), False
+            return msg, False
+        transforms = self.policy.opt(tool or "", "decode_transforms")
+        if transforms and len(text) > guards.TRANSFORM_MAX_CHARS:
+            self.trace.emit("encoded_transforms_skipped", id=msg.get("id"), tool=tool, chars=len(text))
+            self._bump("encoded_transforms_skipped")
+        decision = guards.scan_encoded_text(text, transforms=transforms)
+        if decision.allowed:
+            return msg, False
+        self.trace.emit("encoded_injection", id=msg.get("id"), tool=tool, action=action,
+                        checks=sorted({f.check for f in decision.findings}))
+        if action == BLOCK:
+            self._bump("encoded_injection_blocked")
+            return jsonrpc.error_response(msg.get("id"), BLOCK_ENCODED_CODE,
+                                          f"bastiongate blocked tool result: {decision.reason}"), False
+        self._bump("encoded_injection_warned")
+        self._warn(f"bastiongate: WARN encoded injection in result of {tool}: {decision.reason} "
+                   "- set on_encoded_result: block to stop it")
+        return msg, True  # forwarded in warn mode: the agent reads flagged content (taints the session)
+
     def _scan_result(self, msg: dict, tool: str | None) -> tuple[dict, bool]:
-        text = jsonrpc.result_text(msg)
-        # also scan structuredContent — an injection can hide in structured JSON,
-        # not just in text blocks
-        result = msg.get("result")
-        if isinstance(result, dict) and result.get("structuredContent") is not None:
-            text = f"{text}\n{json.dumps(result['structuredContent'])}"
+        text = self._text_for_scan(msg, tool)
         decision = self._inspect(text)
         if decision.allowed:
             return msg, False
@@ -270,14 +367,45 @@ class Gate:
             f"bastiongate blocked tool result: {decision.reason}",
         ), False
 
+    def _text_for_scan(self, msg: dict, tool: str | None) -> str:
+        """What the agent will read from a result: text blocks, resources (unless the
+        scan_resources kill switch is off) and structuredContent, which can also hide
+        an injection. For an upstream error, its message and data (clients show tool
+        errors to the model)."""
+        err = msg.get("error")
+        if isinstance(err, dict):
+            data = err.get("data")
+            return "\n".join([str(err.get("message", ""))] + ([json.dumps(data, default=str)] if data is not None else []))
+        if err is not None:  # malformed (a bare string or list): some clients show it anyway
+            return json.dumps(err, default=str)
+        text = jsonrpc.result_text(msg, resources=self.policy.opt(tool or "", "scan_resources"))
+        result = msg.get("result")
+        if isinstance(result, dict) and result.get("structuredContent") is not None:
+            text = f"{text}\n{json.dumps(result['structuredContent'])}"
+        return text
+
     def _scrub_result(self, msg: dict, tool: str | None) -> dict:
         """Redact/block secrets a tool RETURNS — in text content blocks AND in
         the result's structuredContent."""
+        err = msg.get("error")
+        if isinstance(err, dict) and isinstance(err.get("message"), str):
+            red, found = pii.scrub_text(err["message"])
+            return self._pii_outcome(msg, tool, found, {**msg, "error": {**err, "message": red}}) if found else msg
         result = msg.get("result")
         if not isinstance(result, dict):
             return msg
         kinds: list[str] = []
         new_result = dict(result)
+
+        resources = self.policy.opt(tool or "", "scan_resources")
+
+        def scrub_res(res):  # resource.text only; blobs are never rewritten (README Limits)
+            if resources and isinstance(res, dict) and isinstance(res.get("text"), str):
+                red, found = pii.scrub_text(res["text"])
+                if found:
+                    kinds.extend(found)
+                    return {**res, "text": red}
+            return res
 
         blocks = result.get("content")
         if isinstance(blocks, list):
@@ -288,8 +416,15 @@ class Gate:
                     if found:
                         kinds.extend(found)
                         b = {**b, "text": red}
+                elif isinstance(b, dict) and b.get("type") == "resource":
+                    res = scrub_res(b.get("resource"))
+                    if res is not b.get("resource"):
+                        b = {**b, "resource": res}
                 new_blocks.append(b)
             new_result["content"] = new_blocks
+        contents = result.get("contents")
+        if isinstance(contents, list):
+            new_result["contents"] = [scrub_res(c) for c in contents]
 
         structured = result.get("structuredContent")
         if structured is not None:
@@ -300,6 +435,9 @@ class Gate:
 
         if not kinds:
             return msg
+        return self._pii_outcome(msg, tool, kinds, {**msg, "result": new_result})
+
+    def _pii_outcome(self, msg: dict, tool: str | None, kinds: list[str], redacted: dict) -> dict:
         uniq = sorted(set(kinds))
         mode = self.policy.opt(tool or "", "on_pii_result")
         if mode == BLOCK:
@@ -314,7 +452,7 @@ class Gate:
             return msg
         self.trace.emit("result_pii_redacted", id=msg.get("id"), tool=tool, kinds=uniq, count=len(kinds))
         self._bump("result_pii_redacted")
-        return {**msg, "result": new_result}
+        return redacted
 
     def _remember(self, session, mid, method, tool, repo=None) -> None:
         now = time.monotonic()
@@ -353,6 +491,13 @@ class Gate:
             if entry is None:
                 return (None, None, None)
             return (entry[0], entry[1], entry[3])
+
+
+def _carries_content(msg: dict) -> bool:
+    if msg.get("error") is not None:
+        return True
+    result = msg.get("result")
+    return isinstance(result, dict) and any(k in result for k in ("content", "contents", "structuredContent"))
 
 
 def _session_hash(session) -> str | None:

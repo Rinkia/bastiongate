@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from bastionsupply.models import Server, Tool
@@ -52,13 +53,114 @@ def scan_tools_list(tools: list[dict]) -> dict[str, tuple]:
     return {k: tuple(v) for k, v in by_tool.items()}
 
 
+def _model_text(t: dict) -> str:
+    """Everything in a tool definition besides inputSchema that reaches the model:
+    description, title, annotations.title, outputSchema (scanned as one text)."""
+    parts = [str(t.get("description", ""))]
+    if isinstance(t.get("title"), str):
+        parts.append(t["title"])
+    ann = t.get("annotations")
+    if isinstance(ann, dict) and isinstance(ann.get("title"), str):
+        parts.append(ann["title"])
+    if t.get("outputSchema") is not None:
+        parts.append(json.dumps(t["outputSchema"], default=str))
+    return "\n".join(p for p in parts if p)
+
+
+def _as_server(tools: list[dict]) -> Server:
+    return Server(name="upstream", tools=tuple(
+        Tool(name=str(t.get("name", "")), description=_model_text(t),
+             input_schema=t.get("inputSchema") or t.get("input_schema") or {})
+        for t in tools if isinstance(t, dict)))  # malformed entries: see proxy._filter_tools
+
+
+def _active(server: Server) -> list:
+    """Only the checks the gate enforces on (not the whole bastionsupply scan, which
+    would also decode every text for a finding the gate then discards)."""
+    from bastionsupply.checks import check_hidden_unicode, check_homoglyph_name, check_tool_poisoning
+
+    return [f for check in (check_tool_poisoning, check_hidden_unicode, check_homoglyph_name)
+            for f in check(server)]
+
+
+# Decoding is linear but not free (~0.2-0.7 s per MB): bigger results are not decoded
+# (and fail closed when on_encoded_result is block, see proxy._scan_encoded).
+ENCODED_SCAN_MAX_CHARS = 1_000_000
+# A tool definition bigger than this is not scanned: it is treated as poisoned (fail
+# closed). No real tool needs a megabyte of description, and the plain scan of a
+# tools/list page has no other bound (~0.3 s per MB per tool).
+TOOL_DEF_MAX_CHARS = 1_000_000
+# ...and a tools/list page bigger than this in total stops being scanned at the tool that
+# crosses it; that tool and every later one fail closed the same way.
+TOOLS_PAGE_MAX_CHARS = 5_000_000
+# decode_transforms adds whole-text rewrites (4 more views of the full text): only on
+# results up to this size, the same bound agentbastion's input guard uses.
+TRANSFORM_MAX_CHARS = 65_536
+
+
+def _def_size(t: dict) -> int:
+    if not isinstance(t, dict):
+        return 0
+    return len(str(t))  # every field counts, whatever its name or nesting
+
+
+def _split_oversize(tools: list[dict]) -> tuple[list[dict], set[str]]:
+    """(tools to scan, names that fail closed): a definition over TOOL_DEF_MAX_CHARS,
+    and every tool from the one that pushes the page past TOOLS_PAGE_MAX_CHARS."""
+    eligible, over, total = [], set(), 0
+    for t in tools:
+        size = _def_size(t)
+        total += size
+        if size > TOOL_DEF_MAX_CHARS or total > TOOLS_PAGE_MAX_CHARS:
+            over.add(str(t.get("name", "")) if isinstance(t, dict) else "")
+        else:
+            eligible.append(t)
+    return eligible, over
+
+
+def oversize_tool_names(tools: list[dict]) -> set[str]:
+    return _split_oversize(tools)[1]
+
+
 def poisoned_tool_names(tools: list[dict]) -> set[str]:
-    """Names whose *own definition* carries an active injection/hidden-unicode."""
-    bad = set()
-    for name, findings in scan_tools_list(tools).items():
-        if any(f.check in _ACTIVE_CHECKS for f in findings):
-            bad.add(name)
-    return bad
+    """Names whose *own definition* carries an active injection/hidden-unicode.
+    Oversize definitions are skipped here; see oversize_tool_names."""
+    eligible, _over = _split_oversize(tools)
+    return {f.tool for f in _active(_as_server(eligible)) if f.check in _ACTIVE_CHECKS}
+
+
+def encoded_findings(tools: list[dict]) -> tuple[dict[str, tuple], list[str]]:
+    """({tool_name: encoded-injection findings}, [names skipped]) for a tools/list page.
+    The size cap is per tool definition: padding one tool cannot switch the check off
+    for the others on the page."""
+    from bastionsupply.checks import check_encoded_injection
+
+    page, over = _split_oversize(tools)
+    eligible = [t for t in page if _def_size(t) <= ENCODED_SCAN_MAX_CHARS]
+    skipped = sorted(over | {str(t.get("name", "")) for t in page if _def_size(t) > ENCODED_SCAN_MAX_CHARS})
+    by_tool: dict[str, list] = {}
+    for f in check_encoded_injection(_as_server(eligible)):
+        by_tool.setdefault(f.tool, []).append(f)
+    return {k: tuple(v) for k, v in by_tool.items()}, skipped
+
+
+def scan_encoded_text(text: str, views=None, *, transforms: bool = False) -> Decision:
+    """A tool result whose ENCODED content (base64, hex, binary, ...) carries an
+    injection (bastionsupply's encoded-injection check). Separate from
+    scan_result_text so the gate can act on it under its own knob. Pass `views`
+    (bastionsupply.checks.decoded_views(text)) to reuse a decode. `transforms` adds the
+    rot13 / leet / reversed / spaced-letter views on texts up to TRANSFORM_MAX_CHARS."""
+    if not text:
+        return Decision(True, "empty result")
+    from bastionsupply.checks import decoded_views, encoded_injection
+
+    if views is None and transforms and len(text) <= TRANSFORM_MAX_CHARS:
+        views = decoded_views(text, transforms=True)
+
+    finding = encoded_injection(text, "The result", "_result", views=views)
+    if finding:
+        return Decision(False, f"tool result hides an injection ({finding.message})", (finding,))
+    return Decision(True, "no encoded injection")
 
 
 def scan_result_text(text: str) -> Decision:
@@ -66,7 +168,8 @@ def scan_result_text(text: str) -> Decision:
     if not text:
         return Decision(True, "empty result")
     synthetic = Server("result", (Tool(name="_result", description=text),))
-    findings = tuple(f for f in scan(synthetic).findings if f.check in _ACTIVE_CHECKS)
+    findings = tuple(sorted((f for f in _active(synthetic) if f.check in _ACTIVE_CHECKS),
+                            key=lambda f: (f.check, f.tool)))
     if findings:
         kinds = ", ".join(sorted({f.check for f in findings}))
         return Decision(False, f"tool result carries injection ({kinds})", findings)

@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.10.0 (unreleased)
+
+- **BEHAVIOR: resource content is scanned.** Embedded `resource` blocks (text, and text-MIME
+  blobs decoded), `resource_link` name/title/description, and `resources/read` responses now
+  go through the same result checks as text blocks: plain injection (-32002, blocks by
+  default), encoded injection, PII scrub and flow-guard taint. Before 0.10 an injection in a
+  resource reached the agent unscanned. Clean resources are forwarded unchanged. Kill switch:
+  `scan_resources: false` (global or per tool; `resources/read` is the pseudo tool name for
+  resource reads).
+  - Blobs are decoded whatever their MIME type (a non-text type counts when it is valid
+    UTF-8); media types (image, audio, video, font, PDF, zip) are never decoded, so a big
+    image cannot trip the size fail-closed. Resource and link `uri`s are scanned too.
+- **BEHAVIOR: upstream errors and uncorrelated responses are scanned.** The `message` and
+  `data` of a JSON-RPC error answering a `tools/call` or `resources/read` go through the
+  result checks (clients show them to the model). A response with no pending request (late
+  past 5 minutes, duplicate or unknown id) is scanned as `(unmatched)` instead of passing
+  through; an uncorrelated `tools/list` result is filtered. Found by the 2026-10-02 security
+  review.
+- tools/list scans now also read `title`, `annotations.title` and `outputSchema`, and the
+  size cap counts the whole definition. Malformed (non-object) tool entries are dropped under
+  `on_poisoned_tool: block`.
+- **BEHAVIOR: `initialize` instructions are scanned.** Poisoned `instructions` are removed and a
+  poisoned `serverInfo` is replaced (under `on_poisoned_tool: block`; `warn` only logs).
+- A response the gate cannot inspect is replaced by error -32002 (`response_uninspectable`)
+  instead of crashing the stdio pump. Secrets in upstream error messages are redacted with
+  `scrub_results`. Both from the 2026-10-02 review, second round.
+- **Encoded injection in tool results.** Results are decoded with bastioncorpus (base64,
+  base32, hex, binary, ascii85/base85, Morse, percent and `\u` escapes) and scanned with
+  bastionsupply's `encoded-injection` check.
+  - New setting `on_encoded_result: warn | block`, **default `warn`** (shadow). Per-tool
+    overrides work.
+  - `warn` forwards the result, logs an `encoded_injection` trace event and a stderr WARN, and
+    taints the session for the flow guard.
+  - `block` returns error -32006.
+  - A result over 1,000,000 characters is not decoded (event `encoded_scan_skipped`); under
+    `block` it fails closed.
+- **tools/list:** a tool definition hiding an encoded injection is warned about
+  (`tools_list_encoded`), not dropped.
+- **BEHAVIOR: oversize tool definitions fail closed.** A tool whose description plus input
+  schema exceeds 1,000,000 characters is no longer scanned; it is handled like a poisoned tool
+  (dropped under the default `on_poisoned_tool: block`, kept under `warn`), with the trace event
+  `tools_list_oversize`. Before, the plain scan had no bound (about 7 s for a 20 MB definition).
+  A page over 5,000,000 characters fails closed from the tool that crosses the limit.
+- **`decode_transforms: true`** (opt-in, global or per tool) also scans the rot13 / leet /
+  reversed / spaced-letter views of results up to 64 KB, under `on_encoded_result`. Off by
+  default (more scan work per result); a bigger result logs `encoded_transforms_skipped`.
+  Evidence: `bastionprobe encoding-bench --defenders supply,supply+transforms` (2026-10-02): rot13 1% -> 88%, leet 1% -> 76%, reversed 1% -> 88%, spaced letters 1% -> 8%, 0% benign FP; and 0 false positives on 45,025 real Markdown paragraphs (skills and memory notes). Promotion bar for a default
+  of `true`: 20 real sessions with 0 false warnings.
+- Decoding is faster with bastioncorpus 0.5.0's performance pass: the encoded scan of a 1 MB
+  base64 result takes about 0.5 s (was 1.4 s).
+- Plain injections keep their own path and code (-32002). Clean results are unchanged.
+- Evidence (`bastionprobe encoding-bench`, 2026-10-01): bastionsupply's scan, which gate
+  reuses, catches 88% of base64/hex/binary/base32/ascii85/base85/percent/escape-encoded
+  corpus attacks (about 1% before), with 0% benign false positives.
+- Requires bastionsupply >= 0.11.0. `bastionsupply doctor` warns when a v1 policy sets
+  `on_encoded_result` but the installed gate is older than 0.10.
+
 ## 0.9.0
 
 - **Flow guard (lethal trifecta).** A per-session taint record catches an egress
