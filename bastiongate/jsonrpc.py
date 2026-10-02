@@ -52,6 +52,7 @@ def error_response(mid, code: int, message: str, data=None) -> dict:
 
 
 _TEXT_MIME_MARKERS = ("json", "xml", "yaml", "javascript")
+_MEDIA_MIME = ("image/", "audio/", "video/", "font/", "application/pdf", "application/zip")
 
 
 def _is_text_mime(mime) -> bool:
@@ -59,24 +60,37 @@ def _is_text_mime(mime) -> bool:
     return mime.startswith("text/") or any(m in mime for m in _TEXT_MIME_MARKERS)
 
 
+def _blob_text(blob: str, mime) -> str | None:
+    """A blob as the text a client could show the model. Text MIME types decode with
+    replacement; any other non-media MIME (missing, octet-stream, a made-up type) counts
+    only if it is valid UTF-8. Media (images, audio, pdf...) goes to the model as media,
+    not text, and is never decoded (a big image must not trip the size fail-closed)."""
+    low = str(mime or "").lower()
+    if low.startswith(_MEDIA_MIME):
+        return None
+    try:
+        raw = base64.b64decode(blob, validate=False)
+    except (binascii.Error, ValueError):
+        return None
+    if _is_text_mime(mime):
+        return raw.decode("utf-8", "replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def resource_texts(res) -> list[str]:
     """Text a model can read from one resource (an embedded `resource` or a
-    `resources/read` contents entry): `text`, and `blob` decoded when its MIME type
-    is text-like. Other blobs are returned raw for the encoded scan's decoder."""
+    `resources/read` contents entry): `uri`, `text`, and `blob` decoded (see _blob_text)."""
     if not isinstance(res, dict):
         return []
-    out = []
-    if isinstance(res.get("text"), str):
-        out.append(res["text"])
+    out = [res[k] for k in ("uri", "text") if isinstance(res.get(k), str)]
     blob = res.get("blob")
     if isinstance(blob, str) and blob:
-        if _is_text_mime(res.get("mimeType")):
-            try:
-                out.append(base64.b64decode(blob, validate=False).decode("utf-8", "replace"))
-            except (binascii.Error, ValueError):
-                out.append(blob)
-        else:
-            out.append(blob)
+        text = _blob_text(blob, res.get("mimeType"))
+        if text:
+            out.append(text)
     return out
 
 
@@ -90,8 +104,8 @@ def _block_texts(block, resources: bool) -> list[str]:
         return []
     if kind == "resource":
         return resource_texts(block.get("resource"))
-    if kind == "resource_link":  # name/title/description reach the model
-        return [str(block[k]) for k in ("name", "title", "description") if isinstance(block.get(k), str)]
+    if kind == "resource_link":  # uri/name/title/description reach the model
+        return [str(block[k]) for k in ("uri", "name", "title", "description") if isinstance(block.get(k), str)]
     return []
 
 

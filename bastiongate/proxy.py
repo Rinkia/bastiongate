@@ -29,6 +29,7 @@ BLOCK_RESULT_PII_CODE = -32004
 BLOCK_FLOW_CODE = -32005
 BLOCK_ENCODED_CODE = -32006
 RESOURCES_READ = "resources/read"  # scanned like a tool result, under this pseudo tool name
+UNMATCHED = "(unmatched)"  # pseudo tool name: a response with no pending request (late, duplicate, unknown id)
 
 # in-flight correlation bounds (per session, so one busy/abusive session can't
 # evict another's entries)
@@ -190,6 +191,13 @@ class Gate:
         if not jsonrpc.is_response(msg):
             return msg
         method, tool, repo = self._recall(session, msg.get("id"))
+        if method is None:  # late (past PENDING_TTL), duplicate or unknown id: never forward unscanned
+            if jsonrpc.tools_from_list_result(msg):
+                method = "tools/list"
+            elif _carries_content(msg):
+                method, tool = "tools/call", UNMATCHED
+                self.trace.emit("response_unmatched", id=msg.get("id"))
+                self._bump("response_unmatched")
 
         if method == "tools/list":
             self._learn_labels(msg)
@@ -210,7 +218,7 @@ class Gate:
                 flagged = flagged or encoded_flagged
             if self.policy.opt(tool or "", "scrub_results"):
                 out = self._scrub_result(out, tool)
-            if self.policy.scan_flows and isinstance(out.get("result"), dict):
+            if self.policy.scan_flows:
                 self._record_taint(out, tool or "", repo, flagged, session)
             return out
         return msg
@@ -287,7 +295,11 @@ class Gate:
                     f"encoded injection (limit {guards.ENCODED_SCAN_MAX_CHARS}); on_encoded_result is block",
                 ), False
             return msg, False
-        decision = guards.scan_encoded_text(text, transforms=self.policy.opt(tool or "", "decode_transforms"))
+        transforms = self.policy.opt(tool or "", "decode_transforms")
+        if transforms and len(text) > guards.TRANSFORM_MAX_CHARS:
+            self.trace.emit("encoded_transforms_skipped", id=msg.get("id"), tool=tool, chars=len(text))
+            self._bump("encoded_transforms_skipped")
+        decision = guards.scan_encoded_text(text, transforms=transforms)
         if decision.allowed:
             return msg, False
         self.trace.emit("encoded_injection", id=msg.get("id"), tool=tool, action=action,
@@ -319,7 +331,12 @@ class Gate:
     def _text_for_scan(self, msg: dict, tool: str | None) -> str:
         """What the agent will read from a result: text blocks, resources (unless the
         scan_resources kill switch is off) and structuredContent, which can also hide
-        an injection."""
+        an injection. For an upstream error, its message and data (clients show tool
+        errors to the model)."""
+        err = msg.get("error")
+        if isinstance(err, dict):
+            data = err.get("data")
+            return "\n".join([str(err.get("message", ""))] + ([json.dumps(data)] if data is not None else []))
         text = jsonrpc.result_text(msg, resources=self.policy.opt(tool or "", "scan_resources"))
         result = msg.get("result")
         if isinstance(result, dict) and result.get("structuredContent") is not None:
@@ -426,6 +443,13 @@ class Gate:
             if entry is None:
                 return (None, None, None)
             return (entry[0], entry[1], entry[3])
+
+
+def _carries_content(msg: dict) -> bool:
+    if isinstance(msg.get("error"), dict):
+        return True
+    result = msg.get("result")
+    return isinstance(result, dict) and any(k in result for k in ("content", "contents", "structuredContent"))
 
 
 def _session_hash(session) -> str | None:

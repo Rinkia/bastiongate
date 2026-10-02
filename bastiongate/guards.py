@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from bastionsupply.models import Server, Tool
@@ -52,9 +53,23 @@ def scan_tools_list(tools: list[dict]) -> dict[str, tuple]:
     return {k: tuple(v) for k, v in by_tool.items()}
 
 
+def _model_text(t: dict) -> str:
+    """Everything in a tool definition besides inputSchema that reaches the model:
+    description, title, annotations.title, outputSchema (scanned as one text)."""
+    parts = [str(t.get("description", ""))]
+    if isinstance(t.get("title"), str):
+        parts.append(t["title"])
+    ann = t.get("annotations")
+    if isinstance(ann, dict) and isinstance(ann.get("title"), str):
+        parts.append(ann["title"])
+    if t.get("outputSchema") is not None:
+        parts.append(json.dumps(t["outputSchema"]))
+    return "\n".join(p for p in parts if p)
+
+
 def _as_server(tools: list[dict]) -> Server:
     return Server(name="upstream", tools=tuple(
-        Tool(name=str(t.get("name", "")), description=str(t.get("description", "")),
+        Tool(name=str(t.get("name", "")), description=_model_text(t),
              input_schema=t.get("inputSchema") or t.get("input_schema") or {})
         for t in tools))
 
@@ -75,23 +90,42 @@ ENCODED_SCAN_MAX_CHARS = 1_000_000
 # closed). No real tool needs a megabyte of description, and the plain scan of a
 # tools/list page has no other bound (~0.3 s per MB per tool).
 TOOL_DEF_MAX_CHARS = 1_000_000
+# ...and a tools/list page bigger than this in total stops being scanned at the tool that
+# crosses it; that tool and every later one fail closed the same way.
+TOOLS_PAGE_MAX_CHARS = 5_000_000
 # decode_transforms adds whole-text rewrites (4 more views of the full text): only on
 # results up to this size, the same bound agentbastion's input guard uses.
 TRANSFORM_MAX_CHARS = 65_536
 
 
 def _def_size(t: dict) -> int:
-    return len(str(t.get("description", ""))) + len(str(t.get("inputSchema") or t.get("input_schema") or ""))
+    if not isinstance(t, dict):
+        return 0
+    return len(str(t))  # every field counts, whatever its name or nesting
+
+
+def _split_oversize(tools: list[dict]) -> tuple[list[dict], set[str]]:
+    """(tools to scan, names that fail closed): a definition over TOOL_DEF_MAX_CHARS,
+    and every tool from the one that pushes the page past TOOLS_PAGE_MAX_CHARS."""
+    eligible, over, total = [], set(), 0
+    for t in tools:
+        size = _def_size(t)
+        total += size
+        if size > TOOL_DEF_MAX_CHARS or total > TOOLS_PAGE_MAX_CHARS:
+            over.add(str(t.get("name", "")) if isinstance(t, dict) else "")
+        else:
+            eligible.append(t)
+    return eligible, over
 
 
 def oversize_tool_names(tools: list[dict]) -> set[str]:
-    return {str(t.get("name", "")) for t in tools if _def_size(t) > TOOL_DEF_MAX_CHARS}
+    return _split_oversize(tools)[1]
 
 
 def poisoned_tool_names(tools: list[dict]) -> set[str]:
     """Names whose *own definition* carries an active injection/hidden-unicode.
     Oversize definitions are skipped here; see oversize_tool_names."""
-    eligible = [t for t in tools if _def_size(t) <= TOOL_DEF_MAX_CHARS]
+    eligible, _over = _split_oversize(tools)
     return {f.tool for f in _active(_as_server(eligible)) if f.check in _ACTIVE_CHECKS}
 
 
@@ -101,8 +135,9 @@ def encoded_findings(tools: list[dict]) -> tuple[dict[str, tuple], list[str]]:
     for the others on the page."""
     from bastionsupply.checks import check_encoded_injection
 
-    eligible = [t for t in tools if _def_size(t) <= ENCODED_SCAN_MAX_CHARS]
-    skipped = [str(t.get("name", "")) for t in tools if _def_size(t) > ENCODED_SCAN_MAX_CHARS]
+    page, over = _split_oversize(tools)
+    eligible = [t for t in page if _def_size(t) <= ENCODED_SCAN_MAX_CHARS]
+    skipped = sorted(over | {str(t.get("name", "")) for t in page if _def_size(t) > ENCODED_SCAN_MAX_CHARS})
     by_tool: dict[str, list] = {}
     for f in check_encoded_injection(_as_server(eligible)):
         by_tool.setdefault(f.tool, []).append(f)

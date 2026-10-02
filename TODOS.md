@@ -2,6 +2,18 @@
 
 ## Open
 
+### Scan prompts and the resource/prompt listings
+
+**What:** scan `prompts/get` results (`messages[].content`) and the names/descriptions in `resources/list`, `resources/templates/list` and `prompts/list`.
+
+**Why:** the 2026-10-02 security review: an injection there reaches the model unscanned (when the client shows them to it).
+
+**Context:** prompts are instructions by design (the user picks one), so the full signature set would false-positive on ordinary prompt templates. Apply the request-direction checks (hidden-unicode, known corpus payloads, encoded known payloads) as bastionmesh does for delegations, and the full set to listing descriptions like tools/list.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** none.
+
 ### Decoder cost on big encoded content (mostly done)
 
 **Done 2026-10-02:** bastioncorpus perf pass (1 MB base64 1.5 s -> 0.4 s, hex 2.4 s -> 0.3 s, bench identical); the gate encoded scan of 1 MB takes about 0.5 s; agentbastion shadow about 1.5 s (was 5.5 s); tool definitions over 1M characters fail closed instead of being scanned. Remaining below is the original note; what is left is a single combined pass, only worth it if real traffic shows MB-sized results.

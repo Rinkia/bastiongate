@@ -199,8 +199,8 @@ tools:
   inside a private read counts as untrusted only if the result inspector flags it;
 - the very first egress call is checked before its own result taints the session,
   so exfiltration needs untrusted and private reads to have happened earlier;
-- a tool call whose response takes longer than 5 minutes loses correlation, and
-  its result is not labelled.
+- a tool call whose response takes longer than 5 minutes loses correlation: its
+  result is still scanned (as `(unmatched)`) but not labelled.
 
 Older gates silently ignore these keys: `bastionsupply doctor --policy policy.yaml`
 warns when bastiongateway < 0.9 would read them.
@@ -223,26 +223,35 @@ tools:
   result as untrusted for the flow guard.
 - `block` replaces it with error -32006.
 - Encoded injections in `tools/list` definitions are warned about, never dropped.
-- A tool definition over 1,000,000 characters is not scanned at all: it is handled like a
-  poisoned tool (event `tools_list_oversize`).
+- A tool definition over 1,000,000 characters, or every tool from the one that takes a
+  `tools/list` page past 5,000,000 characters, is not scanned at all: it is handled like a
+  poisoned tool (event `tools_list_oversize`). Tool scans read `description`, `title`,
+  `annotations.title`, `outputSchema` and `inputSchema`.
 
 **Limits:**
 - Results over 1,000,000 characters are not decoded. They are refused under `block`, and only
   logged (`encoded_scan_skipped`) under `warn`.
 - rot13, leetspeak and reversed text are decoded only with `decode_transforms: true` (off by
-  default), and only on results up to 64 KB. Spaced-out letters are mostly missed (8% on the
-  bench).
+  default), and only on results up to 64 KB; a bigger result gets the run-based views only and
+  the trace event `encoded_transforms_skipped`. Spaced-out letters are mostly missed (8% on
+  the bench).
 - Made-up ciphers can't be decoded by enumeration. Tool allow/deny lists and the flow guard
   are the controls encoding cannot bypass.
 
 ### Resource content (`scan_resources`)
 
 Since 0.10 every result check reads all the text the model can see, not only `text` blocks:
-- embedded `resource` blocks (`resource.text`, and `resource.blob` base64-decoded when its MIME
-  type is text-like: `text/*`, JSON, XML, YAML, JavaScript);
-- `resource_link` blocks (`name`, `title`, `description`);
+- embedded `resource` blocks: `uri`, `text`, and `blob` base64-decoded (any MIME type except
+  media: a text type decodes leniently, anything else counts when it is valid UTF-8; images,
+  audio, video, fonts, PDF and zip are never decoded);
+- `resource_link` blocks (`uri`, `name`, `title`, `description`);
 - `resources/read` responses (`contents[]`), checked under the pseudo tool name
-  `resources/read`.
+  `resources/read`;
+- an upstream JSON-RPC error on a `tools/call` or `resources/read` (`message` and `data`):
+  clients show tool errors to the model;
+- a response with no pending request (late past 5 minutes, duplicate id, unknown id): it is
+  scanned under the pseudo tool name `(unmatched)` instead of passing through (trace event
+  `response_unmatched`); an uncorrelated `tools/list` result is filtered like any other.
 
 The plain injection scan (-32002), the encoded scan (-32006), the PII scrub and the flow-guard
 taint all see this text. Clean resources are forwarded unchanged.
@@ -253,9 +262,14 @@ tools:
   resources/read: {on_injected_result: warn}
 ```
 
-**Limits:** blobs with a non-text MIME type are not decoded as text (the encoded scan still
-decodes base64 runs inside them); the PII scrub redacts `resource.text` but never rewrites a
-blob; `prompts/get` messages are not scanned.
+`scan_resources: false` drops resource text from `tools/call` scans and lets `resources/read`
+responses through entirely (no scan, scrub or taint), as in 0.9.
+
+**Limits:**
+- `prompts/get` messages, and the names and descriptions in `resources/list`,
+  `resources/templates/list` and `prompts/list`, are not scanned (TODOS.md).
+- The PII scrub redacts `resource.text` but never rewrites a blob or a `resource_link`.
+- Media blobs (images, audio, PDF...) are not inspected: the model receives them as media.
 
 ### Argument PII/secret scrub
 

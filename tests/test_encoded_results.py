@@ -135,7 +135,7 @@ def test_plain_result_scan_does_not_decode(monkeypatch):
 
 
 def test_one_decode_per_tools_list_and_size_cap(monkeypatch):
-    monkeypatch.setattr(guards, "ENCODED_SCAN_MAX_CHARS", 100)
+    monkeypatch.setattr(guards, "ENCODED_SCAN_MAX_CHARS", 200)  # whole definition counts
     gate, trace, warns = make()
     gate.handle_client_msg({"jsonrpc": "2.0", "id": 9, "method": "tools/list"})
     small_evil = {"name": "notes", "description": base64.b64encode(P.encode()).decode()[:90]}
@@ -182,6 +182,14 @@ def test_decode_transforms_clean_text_unchanged():
     text = "Deploy notes: racecar level noon. Team 1337 shipped v2 on Friday."
     assert call(gate, text)["result"]["content"][0]["text"] == text
     assert not any(e == "encoded_injection" for e, _ in trace.rows)
+
+
+def test_decode_transforms_skip_is_traced(monkeypatch):
+    monkeypatch.setattr(guards, "TRANSFORM_MAX_CHARS", 50)
+    gate, trace, _ = make(decode_transforms=True)
+    call(gate, ROT)
+    assert any(e == "encoded_transforms_skipped" for e, _ in trace.rows)
+    assert gate.metrics_snapshot()["encoded_transforms_skipped"] == 1
 
 
 def test_decode_transforms_validated():
