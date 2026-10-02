@@ -241,9 +241,9 @@ tools:
 ### Resource content (`scan_resources`)
 
 Since 0.10 every result check reads all the text the model can see, not only `text` blocks:
-- embedded `resource` blocks: `uri`, `text`, and `blob` base64-decoded (any MIME type except
-  media: a text type decodes leniently, anything else counts when it is valid UTF-8; images,
-  audio, video, fonts, PDF and zip are never decoded);
+- embedded `resource` blocks: `uri`, `text`, and `blob` base64-decoded (standard or url-safe,
+  any MIME type except media: a text type decodes leniently, anything else counts when it is
+  valid UTF-8; images other than SVG, audio, video, fonts, PDF and zip are never decoded);
 - `resource_link` blocks (`uri`, `name`, `title`, `description`);
 - `resources/read` responses (`contents[]`), checked under the pseudo tool name
   `resources/read`;
@@ -252,6 +252,13 @@ Since 0.10 every result check reads all the text the model can see, not only `te
 - a response with no pending request (late past 5 minutes, duplicate id, unknown id): it is
   scanned under the pseudo tool name `(unmatched)` instead of passing through (trace event
   `response_unmatched`); an uncorrelated `tools/list` result is filtered like any other.
+
+The `initialize` result's `instructions` and `serverInfo` (clients often put them in the
+system prompt) are scanned like a tool definition: under `on_poisoned_tool: block` poisoned
+`instructions` are removed and a poisoned `serverInfo` is replaced by `{"name": "upstream"}`
+(event `instructions_poisoned`). A response the gate cannot inspect at all is replaced by
+error -32002 (event `response_uninspectable`), never forwarded and never a crash. With
+`scrub_results`, secrets in an upstream error message are redacted too.
 
 The plain injection scan (-32002), the encoded scan (-32006), the PII scrub and the flow-guard
 taint all see this text. Clean resources are forwarded unchanged.

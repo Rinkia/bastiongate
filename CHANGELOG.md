@@ -19,7 +19,13 @@
   through; an uncorrelated `tools/list` result is filtered. Found by the 2026-10-02 security
   review.
 - tools/list scans now also read `title`, `annotations.title` and `outputSchema`, and the
-  size cap counts the whole definition.
+  size cap counts the whole definition. Malformed (non-object) tool entries are dropped under
+  `on_poisoned_tool: block`.
+- **BEHAVIOR: `initialize` instructions are scanned.** Poisoned `instructions` are removed and a
+  poisoned `serverInfo` is replaced (under `on_poisoned_tool: block`; `warn` only logs).
+- A response the gate cannot inspect is replaced by error -32002 (`response_uninspectable`)
+  instead of crashing the stdio pump. Secrets in upstream error messages are redacted with
+  `scrub_results`. Both from the 2026-10-02 review, second round.
 - **Encoded injection in tool results.** Results are decoded with bastioncorpus (base64,
   base32, hex, binary, ascii85/base85, Morse, percent and `\u` escapes) and scanned with
   bastionsupply's `encoded-injection` check.

@@ -83,6 +83,7 @@ class Gate:
         method = jsonrpc.method_of(msg)
         if method == "initialize":
             self.flows.reset(session)  # a new MCP session starts with clean taint
+            self._remember(session, msg.get("id"), "initialize", None)
         elif method == "tools/call":
             name = (msg.get("params") or {}).get("name", "")
             decision = guards.check_tool_call(name, self.policy)
@@ -187,9 +188,20 @@ class Gate:
 
     # --- server -> agent -----------------------------------------------------
     def handle_server_msg(self, msg: dict, session=None) -> dict | None:
-        """Return the (possibly replaced/filtered) message to forward to the agent."""
+        """Return the (possibly replaced/filtered) message to forward to the agent.
+        A message the gate cannot inspect (malformed beyond what the checks expect)
+        is replaced by an error: it never crashes the proxy and is never forwarded."""
         if not jsonrpc.is_response(msg):
             return msg
+        try:
+            return self._handle_response(msg, session)
+        except Exception as e:  # noqa: BLE001 - fail closed on anything unexpected
+            self.trace.emit("response_uninspectable", id=msg.get("id"), reason=type(e).__name__)
+            self._bump("response_uninspectable")
+            return jsonrpc.error_response(msg.get("id"), BLOCK_RESULT_CODE,
+                                          f"bastiongate blocked a response it could not inspect ({type(e).__name__})")
+
+    def _handle_response(self, msg: dict, session) -> dict:
         method, tool, repo = self._recall(session, msg.get("id"))
         if method is None:  # late (past PENDING_TTL), duplicate or unknown id: never forward unscanned
             if jsonrpc.tools_from_list_result(msg):
@@ -199,6 +211,8 @@ class Gate:
                 self.trace.emit("response_unmatched", id=msg.get("id"))
                 self._bump("response_unmatched")
 
+        if method == "initialize":
+            return self._check_instructions(msg)
         if method == "tools/list":
             self._learn_labels(msg)
             return self._filter_tools(msg) if self.policy.scan_tools else msg
@@ -208,12 +222,12 @@ class Gate:
             out, flagged = msg, False
             if self.policy.opt(tool or "", "scan_results"):
                 out, flagged = self._scan_result(out, tool)
-                if "error" in out:  # injection blocked; nothing left to scrub
+                if out is not msg:  # the gate blocked it; nothing left to scrub
                     return out
                 # runs even when the plain scan already flagged (warn mode): one plain
                 # trigger phrase must not exempt an encoded payload from on_encoded_result
                 out, encoded_flagged = self._scan_encoded(out, tool)
-                if "error" in out:
+                if out is not msg:
                     return out
                 flagged = flagged or encoded_flagged
             if self.policy.opt(tool or "", "scrub_results"):
@@ -222,6 +236,29 @@ class Gate:
                 self._record_taint(out, tool or "", repo, flagged, session)
             return out
         return msg
+
+    def _check_instructions(self, msg: dict) -> dict:
+        """initialize.result.instructions (and serverInfo) reach the model, often in the
+        system prompt: scanned like a tool definition. A poisoned one is removed (under
+        on_poisoned_tool: block), the way a poisoned tool is dropped from a listing."""
+        result = msg.get("result")
+        if not self.policy.scan_tools or not isinstance(result, dict):
+            return msg
+        info = result.get("serverInfo") if isinstance(result.get("serverInfo"), dict) else {}
+        info_text = "\n".join(v for v in (info.get(k) for k in ("name", "title", "description")) if isinstance(v, str))
+        bad = {key: d.reason for key, text in (("instructions", result.get("instructions")), ("serverInfo", info_text))
+               if isinstance(text, str) and text and not (d := guards.scan_result_text(text)).allowed}
+        if not bad:
+            return msg
+        self.trace.emit("instructions_poisoned", id=msg.get("id"), fields=sorted(bad))
+        self._bump("instructions_poisoned")
+        if self.policy.on_poisoned_tool != BLOCK:
+            self._warn(f"bastiongate: WARN server {', '.join(sorted(bad))} carry an injection")
+            return msg
+        clean = {k: v for k, v in result.items() if k != "instructions" or "instructions" not in bad}
+        if "serverInfo" in bad:
+            clean["serverInfo"] = {"name": "upstream", "version": str(info.get("version", ""))}
+        return {**msg, "result": clean}
 
     def _learn_labels(self, msg: dict) -> None:
         tools = jsonrpc.tools_from_list_result(msg)
@@ -264,15 +301,17 @@ class Gate:
         oversize = guards.oversize_tool_names(tools)
         if oversize:  # too big to scan: fail closed, handled like a poisoned tool
             self.trace.emit("tools_list_oversize", tools=sorted(oversize), limit=guards.TOOL_DEF_MAX_CHARS)
+            self._warn(f"bastiongate: WARN {len(oversize)} tool(s) too large to scan, handled as poisoned "
+                       f"(per tool {guards.TOOL_DEF_MAX_CHARS}, per page {guards.TOOLS_PAGE_MAX_CHARS} characters)")
             bad = bad | oversize
-        if not bad:
+        if not bad and all(isinstance(t, dict) for t in tools):  # malformed entries: filtered below
             self.trace.emit("tools_list_scanned", count=len(tools), poisoned=0)
             return msg
         self.trace.emit("tools_list_scanned", count=len(tools), poisoned=len(bad), dropped=sorted(bad))
         self._bump("tools_dropped", len(bad))
         if self.policy.on_poisoned_tool != BLOCK:
             return msg
-        kept = [t for t in tools if t.get("name") not in bad]
+        kept = [t for t in tools if isinstance(t, dict) and t.get("name") not in bad]  # malformed: dropped
         new = dict(msg)
         new_result = dict(msg.get("result") or {})
         new_result["tools"] = kept
@@ -336,7 +375,9 @@ class Gate:
         err = msg.get("error")
         if isinstance(err, dict):
             data = err.get("data")
-            return "\n".join([str(err.get("message", ""))] + ([json.dumps(data)] if data is not None else []))
+            return "\n".join([str(err.get("message", ""))] + ([json.dumps(data, default=str)] if data is not None else []))
+        if err is not None:  # malformed (a bare string or list): some clients show it anyway
+            return json.dumps(err, default=str)
         text = jsonrpc.result_text(msg, resources=self.policy.opt(tool or "", "scan_resources"))
         result = msg.get("result")
         if isinstance(result, dict) and result.get("structuredContent") is not None:
@@ -346,6 +387,10 @@ class Gate:
     def _scrub_result(self, msg: dict, tool: str | None) -> dict:
         """Redact/block secrets a tool RETURNS — in text content blocks AND in
         the result's structuredContent."""
+        err = msg.get("error")
+        if isinstance(err, dict) and isinstance(err.get("message"), str):
+            red, found = pii.scrub_text(err["message"])
+            return self._pii_outcome(msg, tool, found, {**msg, "error": {**err, "message": red}}) if found else msg
         result = msg.get("result")
         if not isinstance(result, dict):
             return msg
@@ -390,6 +435,9 @@ class Gate:
 
         if not kinds:
             return msg
+        return self._pii_outcome(msg, tool, kinds, {**msg, "result": new_result})
+
+    def _pii_outcome(self, msg: dict, tool: str | None, kinds: list[str], redacted: dict) -> dict:
         uniq = sorted(set(kinds))
         mode = self.policy.opt(tool or "", "on_pii_result")
         if mode == BLOCK:
@@ -404,7 +452,7 @@ class Gate:
             return msg
         self.trace.emit("result_pii_redacted", id=msg.get("id"), tool=tool, kinds=uniq, count=len(kinds))
         self._bump("result_pii_redacted")
-        return {**msg, "result": new_result}
+        return redacted
 
     def _remember(self, session, mid, method, tool, repo=None) -> None:
         now = time.monotonic()
@@ -446,7 +494,7 @@ class Gate:
 
 
 def _carries_content(msg: dict) -> bool:
-    if isinstance(msg.get("error"), dict):
+    if msg.get("error") is not None:
         return True
     result = msg.get("result")
     return isinstance(result, dict) and any(k in result for k in ("content", "contents", "structuredContent"))

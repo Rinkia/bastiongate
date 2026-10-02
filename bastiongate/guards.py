@@ -63,7 +63,7 @@ def _model_text(t: dict) -> str:
     if isinstance(ann, dict) and isinstance(ann.get("title"), str):
         parts.append(ann["title"])
     if t.get("outputSchema") is not None:
-        parts.append(json.dumps(t["outputSchema"]))
+        parts.append(json.dumps(t["outputSchema"], default=str))
     return "\n".join(p for p in parts if p)
 
 
@@ -71,7 +71,7 @@ def _as_server(tools: list[dict]) -> Server:
     return Server(name="upstream", tools=tuple(
         Tool(name=str(t.get("name", "")), description=_model_text(t),
              input_schema=t.get("inputSchema") or t.get("input_schema") or {})
-        for t in tools))
+        for t in tools if isinstance(t, dict)))  # malformed entries: see proxy._filter_tools
 
 
 def _active(server: Server) -> list:

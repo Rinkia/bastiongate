@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from typing import IO, Iterator
 
 
@@ -53,6 +54,8 @@ def error_response(mid, code: int, message: str, data=None) -> dict:
 
 _TEXT_MIME_MARKERS = ("json", "xml", "yaml", "javascript")
 _MEDIA_MIME = ("image/", "audio/", "video/", "font/", "application/pdf", "application/zip")
+_URLSAFE = str.maketrans("-_", "+/")
+_NOT_B64 = re.compile(r"[^A-Za-z0-9+/]+")
 
 
 def _is_text_mime(mime) -> bool:
@@ -66,10 +69,11 @@ def _blob_text(blob: str, mime) -> str | None:
     only if it is valid UTF-8. Media (images, audio, pdf...) goes to the model as media,
     not text, and is never decoded (a big image must not trip the size fail-closed)."""
     low = str(mime or "").lower()
-    if low.startswith(_MEDIA_MIME):
+    if low.startswith(_MEDIA_MIME) and "xml" not in low:  # SVG is text a client may pass on
         return None
     try:
-        raw = base64.b64decode(blob, validate=False)
+        b64 = _NOT_B64.sub("", blob.translate(_URLSAFE))  # base64url too; whitespace dropped
+        raw = base64.b64decode(b64 + "=" * (-len(b64) % 4))
     except (binascii.Error, ValueError):
         return None
     if _is_text_mime(mime):

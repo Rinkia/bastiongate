@@ -264,6 +264,79 @@ def test_scan_resources_knob_validated():
         from_dict({"default": "allow", "tools": {"t": {"scan_resources": 1}}})
 
 
+# --- round 2 review ---------------------------------------------------------------
+
+@pytest.mark.parametrize("tools", [["abc"], [None], [5, {"name": "ok", "description": "Reads."}]],
+                         ids=["str", "none", "mixed"])
+def test_malformed_tool_entries_never_crash(tools):
+    gate, _, _ = make()
+    gate.handle_client_msg({"jsonrpc": "2.0", "id": 60, "method": "tools/list"})
+    out = gate.handle_server_msg({"jsonrpc": "2.0", "id": 60, "result": {"tools": tools}})
+    assert all(isinstance(t, dict) for t in out["result"]["tools"])
+
+
+def test_uninspectable_response_fails_closed(monkeypatch):
+    gate, trace, _ = make()
+    monkeypatch.setattr(gate, "_handle_response", lambda *a: 1 / 0)
+    out = gate.handle_server_msg({"jsonrpc": "2.0", "id": 61, "result": {"content": []}})
+    assert out["error"]["code"] == BLOCK_RESULT_CODE and "ZeroDivisionError" in out["error"]["message"]
+    assert any(e == "response_uninspectable" for e, _ in trace.rows)
+
+
+@pytest.mark.parametrize("err", [P, [P], {"nested": P}.__str__()], ids=["str", "list", "repr"])
+def test_non_dict_error_is_scanned(err):
+    gate, _, _ = make()
+    gate.handle_client_msg({"jsonrpc": "2.0", "id": 62, "method": "tools/call", "params": {"name": "t", "arguments": {}}})
+    out = gate.handle_server_msg({"jsonrpc": "2.0", "id": 62, "error": err})
+    assert out["error"]["code"] == BLOCK_RESULT_CODE
+
+
+def _init(gate, result, mid=70):
+    gate.handle_client_msg({"jsonrpc": "2.0", "id": mid, "method": "initialize", "params": {}})
+    return gate.handle_server_msg({"jsonrpc": "2.0", "id": mid, "result": result})
+
+
+def test_poisoned_instructions_removed():
+    gate, trace, _ = make()
+    result = {"protocolVersion": "2025-06-18", "serverInfo": {"name": "fs", "version": "1"}, "instructions": P}
+    out = _init(gate, result)
+    assert "instructions" not in out["result"] and out["result"]["serverInfo"] == {"name": "fs", "version": "1"}
+    assert any(e == "instructions_poisoned" for e, _ in trace.rows)
+
+
+def test_poisoned_server_name_replaced_and_warn_mode_keeps():
+    gate, _, _ = make()
+    out = _init(gate, {"serverInfo": {"name": P, "version": "2"}, "instructions": "Use read_file for files."})
+    assert out["result"]["serverInfo"] == {"name": "upstream", "version": "2"}
+    assert out["result"]["instructions"] == "Use read_file for files."
+    gate, _, warns = make(on_poisoned_tool="warn")
+    assert _init(gate, {"instructions": P})["result"]["instructions"] == P and warns
+
+
+def test_clean_initialize_unchanged():
+    gate, _, _ = make()
+    result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+              "serverInfo": {"name": "fs", "version": "1"}, "instructions": "Call list_dir before read_file."}
+    assert _init(gate, copy.deepcopy(result))["result"] == result
+
+
+@pytest.mark.parametrize("mime,blob", [
+    ("image/svg+xml", base64.b64encode(f"<svg><text>{P}</text></svg>".encode()).decode()),
+    (None, base64.urlsafe_b64encode(("??>" + P).encode()).decode()),
+    (None, base64.b64encode(P.encode()).decode().rstrip("=")),
+    ("text/plain", "\n".join(base64.encodebytes(P.encode()).decode().split())),
+], ids=["svg", "urlsafe", "unpadded", "wrapped"])
+def test_blob_shapes_are_read(mime, blob):
+    assert P in jsonrpc.result_text({"result": {"content": [res(blob=blob, mime=mime)]}})
+
+
+def test_secret_in_error_message_is_redacted():
+    gate, _, _ = make(scrub_results=True)
+    gate.handle_client_msg({"jsonrpc": "2.0", "id": 63, "method": "tools/call", "params": {"name": "t", "arguments": {}}})
+    out = gate.handle_server_msg({"jsonrpc": "2.0", "id": 63, "error": {"code": -1, "message": f"bad key {KEY}"}})
+    assert KEY not in out["error"]["message"] and out["error"]["code"] == -1
+
+
 # --- tools/list size cap (plain scan) -------------------------------------------
 
 def _list(gate, tools, mid=50):
