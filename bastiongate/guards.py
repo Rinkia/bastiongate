@@ -75,6 +75,9 @@ ENCODED_SCAN_MAX_CHARS = 1_000_000
 # closed). No real tool needs a megabyte of description, and the plain scan of a
 # tools/list page has no other bound (~0.3 s per MB per tool).
 TOOL_DEF_MAX_CHARS = 1_000_000
+# decode_transforms adds whole-text rewrites (4 more views of the full text): only on
+# results up to this size, the same bound agentbastion's input guard uses.
+TRANSFORM_MAX_CHARS = 65_536
 
 
 def _def_size(t: dict) -> int:
@@ -106,14 +109,18 @@ def encoded_findings(tools: list[dict]) -> tuple[dict[str, tuple], list[str]]:
     return {k: tuple(v) for k, v in by_tool.items()}, skipped
 
 
-def scan_encoded_text(text: str, views=None) -> Decision:
+def scan_encoded_text(text: str, views=None, *, transforms: bool = False) -> Decision:
     """A tool result whose ENCODED content (base64, hex, binary, ...) carries an
     injection (bastionsupply's encoded-injection check). Separate from
     scan_result_text so the gate can act on it under its own knob. Pass `views`
-    (bastionsupply.checks.decoded_views(text)) to reuse a decode."""
+    (bastionsupply.checks.decoded_views(text)) to reuse a decode. `transforms` adds the
+    rot13 / leet / reversed / spaced-letter views on texts up to TRANSFORM_MAX_CHARS."""
     if not text:
         return Decision(True, "empty result")
-    from bastionsupply.checks import encoded_injection
+    from bastionsupply.checks import decoded_views, encoded_injection
+
+    if views is None and transforms and len(text) <= TRANSFORM_MAX_CHARS:
+        views = decoded_views(text, transforms=True)
 
     finding = encoded_injection(text, "The result", "_result", views=views)
     if finding:

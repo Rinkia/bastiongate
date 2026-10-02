@@ -25,6 +25,10 @@
   schema exceeds 1,000,000 characters is no longer scanned; it is handled like a poisoned tool
   (dropped under the default `on_poisoned_tool: block`, kept under `warn`), with the trace event
   `tools_list_oversize`. Before, the plain scan had no bound (about 7 s for a 20 MB definition).
+- **`decode_transforms: true`** (opt-in, global or per tool) also scans the rot13 / leet /
+  reversed / spaced-letter views of results up to 64 KB, under `on_encoded_result`. Off by
+  default (more scan work per result). Evidence: `bastionprobe encoding-bench --defenders supply,supply+transforms` (2026-10-02): rot13 1% -> 88%, leet 1% -> 76%, reversed 1% -> 88%, spaced letters 1% -> 8%, 0% benign FP; and 0 false positives on 45,025 real Markdown paragraphs (skills and memory notes). Promotion bar for a default
+  of `true`: 20 real sessions with 0 false warnings.
 - Decoding is faster with bastioncorpus 0.5.0's performance pass: the encoded scan of a 1 MB
   base64 result takes about 0.5 s (was 1.4 s).
 - Plain injections keep their own path and code (-32002). Clean results are unchanged.

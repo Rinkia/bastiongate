@@ -25,7 +25,10 @@ Typical messages (KBs) cost about 1 ms.
 **Priority:** P3
 **Depends on:** none.
 
-### Whole-text decode views in the runtime scanners
+### Whole-text decode views in the runtime scanners (done, opt-in)
+
+**Done 2026-10-02:** gate `decode_transforms` and mesh `actions.decode_transforms`, off by default; bench defender `supply+transforms`. Open: flip the default after 20 real sessions with 0 false warnings; improve the spaced-letters view (8%).
+
 
 **What:** run the rot13 / leet / reversed / spaced-letter views (`bastioncorpus.variants(text, transforms=True)`) on tool results in the gate and on replies in bastionmesh, not only in agentbastion's input guard.
 

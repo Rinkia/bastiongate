@@ -287,7 +287,7 @@ class Gate:
                     f"encoded injection (limit {guards.ENCODED_SCAN_MAX_CHARS}); on_encoded_result is block",
                 ), False
             return msg, False
-        decision = guards.scan_encoded_text(text)
+        decision = guards.scan_encoded_text(text, transforms=self.policy.opt(tool or "", "decode_transforms"))
         if decision.allowed:
             return msg, False
         self.trace.emit("encoded_injection", id=msg.get("id"), tool=tool, action=action,

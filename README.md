@@ -214,6 +214,7 @@ views.
 
 ```yaml
 on_encoded_result: warn      # warn (default, shadow) | block (-32006)
+decode_transforms: false     # true = also rot13 / leet / reversed / spaced views (results <= 64 KB)
 tools:
   fetch: {on_encoded_result: block}
 ```
@@ -228,8 +229,9 @@ tools:
 **Limits:**
 - Results over 1,000,000 characters are not decoded. They are refused under `block`, and only
   logged (`encoded_scan_skipped`) under `warn`.
-- rot13, leetspeak and reversed text are decoded only by agentbastion's input guard
-  (TODOS.md).
+- rot13, leetspeak and reversed text are decoded only with `decode_transforms: true` (off by
+  default), and only on results up to 64 KB. Spaced-out letters are mostly missed (8% on the
+  bench).
 - Made-up ciphers can't be decoded by enumeration. Tool allow/deny lists and the flow guard
   are the controls encoding cannot bypass.
 

@@ -49,6 +49,7 @@ class GatePolicy:
     on_tainted_egress: str = WARN  # warn (shadow, default) | block (-32005)
     # encoded injection in tool results (base64/hex/binary... decoded by bastioncorpus)
     on_encoded_result: str = WARN  # warn (shadow, default) | block (-32006)
+    decode_transforms: bool = False  # also rot13/leet/reversed/spaced views (opt-in, results <= 64 KB)
     label_packs: bool = True  # built-in labels for common servers (github, fetch, ...)
 
     # per-tool knob overrides: {tool_name: {knob: value}}; `labels` sets flow labels
@@ -62,7 +63,7 @@ class GatePolicy:
     # knobs that a per-tool override may set
     _OVERRIDABLE = ("scrub_args", "on_pii_arg", "scan_results", "on_injected_result",
                     "scrub_results", "on_pii_result", "on_tainted_egress", "on_encoded_result",
-                    "scan_resources")
+                    "scan_resources", "decode_transforms")
 
     def tool_allowed(self, name: str) -> bool:
         if name in self.deny:
@@ -119,7 +120,8 @@ _V2_CORE = frozenset({"policy_version", "default", "allow", "deny", "rate_limits
 _V2_BLOCKS = frozenset({"gate", "bastion", "supply", "skill"})
 _TOOL_POLICY_LISTS = ("allow", "deny", "rate_limits")
 _BOOL_KNOBS = ("scan_tools", "scan_results", "scrub_args", "scrub_results",
-               "inspector_judge", "inspector_semantic", "scan_flows", "label_packs", "scan_resources")
+               "inspector_judge", "inspector_semantic", "scan_flows", "label_packs", "scan_resources",
+               "decode_transforms")
 _CHOICE_KNOBS = {
     "on_poisoned_tool": (BLOCK, WARN),
     "on_injected_result": (BLOCK, WARN),
@@ -130,7 +132,8 @@ _CHOICE_KNOBS = {
     "result_inspector": ("static", "agentbastion"),
     "inspector_fail": ("closed", "open"),
 }
-_FLOW_KNOBS = ("scan_flows", "on_tainted_egress", "label_packs", "on_encoded_result", "scan_resources")
+_FLOW_KNOBS = ("scan_flows", "on_tainted_egress", "label_packs", "on_encoded_result", "scan_resources",
+               "decode_transforms")
 _GATE_KNOBS = frozenset(_BOOL_KNOBS) | frozenset(_CHOICE_KNOBS) | {"tools"}
 _MODES = ("off", "shadow", "enforce")
 _INSPECTOR_NAMESPACES = ("bastion.", "custom.")  # run by agentbastion deep-inspect
@@ -278,7 +281,7 @@ def _from_v1(obj: dict) -> GatePolicy:
             # a string `labels: "egress"` must never be iterated character by character
             if "labels" in override:
                 _check_labels(override["labels"], f"tools.{tool}")
-            for knob in ("on_tainted_egress", "on_encoded_result", "scan_resources"):
+            for knob in ("on_tainted_egress", "on_encoded_result", "scan_resources", "decode_transforms"):
                 if knob in override:
                     _check_knob(knob, override[knob], f"tools.{tool}")
     return GatePolicy(
@@ -301,6 +304,7 @@ def _from_v1(obj: dict) -> GatePolicy:
         scan_flows=obj.get("scan_flows", True),
         on_tainted_egress=obj.get("on_tainted_egress", WARN),
         on_encoded_result=obj.get("on_encoded_result", WARN),
+        decode_transforms=obj.get("decode_transforms", False),
         label_packs=obj.get("label_packs", True),
         tools=tools,
     )
