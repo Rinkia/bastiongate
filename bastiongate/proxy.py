@@ -253,6 +253,10 @@ class Gate:
             self._bump("tools_encoded_warned")
             self._warn(f"bastiongate: WARN tool definition(s) hide an encoded injection: {', '.join(sorted(encoded))}")
         bad = guards.poisoned_tool_names(tools)
+        oversize = guards.oversize_tool_names(tools)
+        if oversize:  # too big to scan: fail closed, handled like a poisoned tool
+            self.trace.emit("tools_list_oversize", tools=sorted(oversize), limit=guards.TOOL_DEF_MAX_CHARS)
+            bad = bad | oversize
         if not bad:
             self.trace.emit("tools_list_scanned", count=len(tools), poisoned=0)
             return msg

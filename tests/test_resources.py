@@ -196,3 +196,31 @@ def test_scan_resources_knob_validated():
         from_dict({"scan_resources": "no"})
     with pytest.raises(PolicyError):
         from_dict({"default": "allow", "tools": {"t": {"scan_resources": 1}}})
+
+
+# --- tools/list size cap (plain scan) -------------------------------------------
+
+def _list(gate, tools, mid=50):
+    gate.handle_client_msg({"jsonrpc": "2.0", "id": mid, "method": "tools/list"})
+    return gate.handle_server_msg({"jsonrpc": "2.0", "id": mid, "result": {"tools": tools}})
+
+
+def test_oversize_tool_definition_is_dropped_not_scanned(monkeypatch):
+    from bastiongate import guards
+
+    monkeypatch.setattr(guards, "TOOL_DEF_MAX_CHARS", 1000)
+    gate, trace, _ = make()
+    tools = [{"name": "huge", "description": "fine words " * 200}, {"name": "ok", "description": "Reads a file."}]
+    out = _list(gate, tools)
+    assert [t["name"] for t in out["result"]["tools"]] == ["ok"]
+    assert ("tools_list_oversize", {"tools": ["huge"], "limit": 1000}) in trace.rows
+
+
+def test_oversize_tool_kept_under_warn(monkeypatch):
+    from bastiongate import guards
+
+    monkeypatch.setattr(guards, "TOOL_DEF_MAX_CHARS", 1000)
+    gate, trace, _ = make(on_poisoned_tool="warn")
+    tools = [{"name": "huge", "description": "x " * 1000}]
+    assert _list(gate, tools)["result"]["tools"] == tools
+    assert any(e == "tools_list_oversize" for e, _ in trace.rows)

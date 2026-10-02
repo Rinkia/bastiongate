@@ -21,6 +21,12 @@
     `block` it fails closed.
 - **tools/list:** a tool definition hiding an encoded injection is warned about
   (`tools_list_encoded`), not dropped.
+- **BEHAVIOR: oversize tool definitions fail closed.** A tool whose description plus input
+  schema exceeds 1,000,000 characters is no longer scanned; it is handled like a poisoned tool
+  (dropped under the default `on_poisoned_tool: block`, kept under `warn`), with the trace event
+  `tools_list_oversize`. Before, the plain scan had no bound (about 7 s for a 20 MB definition).
+- Decoding is faster with bastioncorpus 0.5.0's performance pass: the encoded scan of a 1 MB
+  base64 result takes about 0.5 s (was 1.4 s).
 - Plain injections keep their own path and code (-32002). Clean results are unchanged.
 - Evidence (`bastionprobe encoding-bench`, 2026-10-01): bastionsupply's scan, which gate
   reuses, catches 88% of base64/hex/binary/base32/ascii85/base85/percent/escape-encoded

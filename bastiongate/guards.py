@@ -68,14 +68,28 @@ def _active(server: Server) -> list:
             for f in check(server)]
 
 
-def poisoned_tool_names(tools: list[dict]) -> set[str]:
-    """Names whose *own definition* carries an active injection/hidden-unicode."""
-    return {f.tool for f in _active(_as_server(tools)) if f.check in _ACTIVE_CHECKS}
-
-
-# Decoding is linear but not free (~0.2-2 s per MB): bigger results are not decoded
+# Decoding is linear but not free (~0.2-0.7 s per MB): bigger results are not decoded
 # (and fail closed when on_encoded_result is block, see proxy._scan_encoded).
 ENCODED_SCAN_MAX_CHARS = 1_000_000
+# A tool definition bigger than this is not scanned: it is treated as poisoned (fail
+# closed). No real tool needs a megabyte of description, and the plain scan of a
+# tools/list page has no other bound (~0.3 s per MB per tool).
+TOOL_DEF_MAX_CHARS = 1_000_000
+
+
+def _def_size(t: dict) -> int:
+    return len(str(t.get("description", ""))) + len(str(t.get("inputSchema") or t.get("input_schema") or ""))
+
+
+def oversize_tool_names(tools: list[dict]) -> set[str]:
+    return {str(t.get("name", "")) for t in tools if _def_size(t) > TOOL_DEF_MAX_CHARS}
+
+
+def poisoned_tool_names(tools: list[dict]) -> set[str]:
+    """Names whose *own definition* carries an active injection/hidden-unicode.
+    Oversize definitions are skipped here; see oversize_tool_names."""
+    eligible = [t for t in tools if _def_size(t) <= TOOL_DEF_MAX_CHARS]
+    return {f.tool for f in _active(_as_server(eligible)) if f.check in _ACTIVE_CHECKS}
 
 
 def encoded_findings(tools: list[dict]) -> tuple[dict[str, tuple], list[str]]:
@@ -84,11 +98,8 @@ def encoded_findings(tools: list[dict]) -> tuple[dict[str, tuple], list[str]]:
     for the others on the page."""
     from bastionsupply.checks import check_encoded_injection
 
-    def size(t: dict) -> int:
-        return len(str(t.get("description", ""))) + len(str(t.get("inputSchema") or ""))
-
-    eligible = [t for t in tools if size(t) <= ENCODED_SCAN_MAX_CHARS]
-    skipped = [str(t.get("name", "")) for t in tools if size(t) > ENCODED_SCAN_MAX_CHARS]
+    eligible = [t for t in tools if _def_size(t) <= ENCODED_SCAN_MAX_CHARS]
+    skipped = [str(t.get("name", "")) for t in tools if _def_size(t) > ENCODED_SCAN_MAX_CHARS]
     by_tool: dict[str, list] = {}
     for f in check_encoded_injection(_as_server(eligible)):
         by_tool.setdefault(f.tool, []).append(f)

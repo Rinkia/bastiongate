@@ -222,6 +222,8 @@ tools:
   result as untrusted for the flow guard.
 - `block` replaces it with error -32006.
 - Encoded injections in `tools/list` definitions are warned about, never dropped.
+- A tool definition over 1,000,000 characters is not scanned at all: it is handled like a
+  poisoned tool (event `tools_list_oversize`).
 
 **Limits:**
 - Results over 1,000,000 characters are not decoded. They are refused under `block`, and only

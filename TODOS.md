@@ -2,7 +2,10 @@
 
 ## Open
 
-### Decoder cost on big encoded content
+### Decoder cost on big encoded content (mostly done)
+
+**Done 2026-10-02:** bastioncorpus perf pass (1 MB base64 1.5 s -> 0.4 s, hex 2.4 s -> 0.3 s, bench identical); the gate encoded scan of 1 MB takes about 0.5 s; agentbastion shadow about 1.5 s (was 5.5 s); tool definitions over 1M characters fail closed instead of being scanned. Remaining below is the original note; what is left is a single combined pass, only worth it if real traffic shows MB-sized results.
+
 
 **What:** speed up `bastioncorpus.variants` on large encoded runs, or cap decode input lower on the runtime path.
 
