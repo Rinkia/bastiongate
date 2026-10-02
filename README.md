@@ -273,10 +273,33 @@ tools:
 responses through entirely (no scan, scrub or taint), as in 0.9.
 
 **Limits:**
-- `prompts/get` messages, and the names and descriptions in `resources/list`,
-  `resources/templates/list` and `prompts/list`, are not scanned (TODOS.md).
 - The PII scrub redacts `resource.text` but never rewrites a blob or a `resource_link`.
 - Media blobs (images, audio, PDF...) are not inspected: the model receives them as media.
+
+### Prompts and listings (`scan_prompts`)
+
+Since 0.11 the gate also checks the other server text a client can hand the model:
+- **`prompts/get`**: a prompt template is instructions by design ("always review...", "you
+  must..."), so the full injection signatures would flag ordinary templates (98 of 1,015 real
+  skill and agent files did). Only high-precision checks run: hidden or control unicode (an
+  emoji joiner and a leading byte-order mark are allowed), a known bastioncorpus payload, or
+  one hidden in an encoding. A hit is handled by `on_injected_result` (block: -32002, warn:
+  forwarded and the session tainted), under the pseudo tool name `prompts/get`.
+- **`resources/list`, `resources/templates/list`, `prompts/list`**: each entry's name, title,
+  description, uri and prompt-argument descriptions get the same checks as a tool definition.
+  A poisoned, oversize or malformed entry is dropped under `on_poisoned_tool: block`
+  (event `listing_poisoned`).
+
+```yaml
+scan_prompts: true              # default; false = neither is checked (0.10 behaviour)
+tools:
+  prompts/get: {on_injected_result: warn}
+```
+
+**Limits:** a prompt template carrying a new, never-seen injection phrase in plain text is not
+flagged: that is the price of zero false positives on real templates (0 of 1,015 skill and
+agent files flagged; the 3 hits were stray byte-order marks and zero-width spaces in
+non-prompt files).
 
 ### Argument PII/secret scrub
 

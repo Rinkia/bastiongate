@@ -2,7 +2,7 @@
 
 ## Open
 
-### Scan prompts and the resource/prompt listings
+### Scan prompts and the resource/prompt listings (done in 0.11.0, branch feat/prompts-scan)
 
 **What:** scan `prompts/get` results (`messages[].content`) and the names/descriptions in `resources/list`, `resources/templates/list` and `prompts/list`.
 

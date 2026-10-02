@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.0 (unreleased)
+
+- **BEHAVIOR: prompts and listings are checked** (`scan_prompts`, default true, per-prompt
+  override under `prompts/get`).
+  - `prompts/get`: hidden/control unicode, known bastioncorpus payloads and encoded known
+    payloads only (templates are instructions by design). Blocks under the default
+    `on_injected_result: block` (-32002).
+  - `resources/list`, `resources/templates/list`, `prompts/list`: poisoned, oversize or
+    malformed entries are dropped under `on_poisoned_tool: block`.
+  - Uncorrelated responses of these shapes are routed to the same checks.
+- Evidence: on 1,015 real skill and agent files, the prompt checks flagged 0 prompts (3 hits,
+  all byte-order marks or zero-width spaces in non-prompt files); the full signature set
+  would have flagged 98.
+
 ## 0.10.0 (unreleased)
 
 - **BEHAVIOR: resource content is scanned.** Embedded `resource` blocks (text, and text-MIME

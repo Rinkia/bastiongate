@@ -29,6 +29,9 @@ BLOCK_RESULT_PII_CODE = -32004
 BLOCK_FLOW_CODE = -32005
 BLOCK_ENCODED_CODE = -32006
 RESOURCES_READ = "resources/read"  # scanned like a tool result, under this pseudo tool name
+PROMPTS_GET = "prompts/get"  # pseudo tool name for per-prompt overrides and traces
+LISTINGS = {"resources/list": "resources", "resources/templates/list": "resourceTemplates",
+            "prompts/list": "prompts"}  # method -> result key
 UNMATCHED = "(unmatched)"  # pseudo tool name: a response with no pending request (late, duplicate, unknown id)
 
 # in-flight correlation bounds (per session, so one busy/abusive session can't
@@ -105,6 +108,8 @@ class Gate:
             self._remember(session, msg.get("id"), "tools/list", None)
         elif method == RESOURCES_READ:
             self._remember(session, msg.get("id"), RESOURCES_READ, RESOURCES_READ)
+        elif method == PROMPTS_GET or method in LISTINGS:
+            self._remember(session, msg.get("id"), method, PROMPTS_GET if method == PROMPTS_GET else None)
         return msg, None
 
     def _scrub_args(self, msg: dict, name: str) -> tuple[dict | None, dict | None]:
@@ -204,8 +209,14 @@ class Gate:
     def _handle_response(self, msg: dict, session) -> dict:
         method, tool, repo = self._recall(session, msg.get("id"))
         if method is None:  # late (past PENDING_TTL), duplicate or unknown id: never forward unscanned
+            result = msg.get("result") if isinstance(msg.get("result"), dict) else {}
+            listing = next((m for m, key in LISTINGS.items() if isinstance(result.get(key), list)), None)
             if jsonrpc.tools_from_list_result(msg):
                 method = "tools/list"
+            elif listing:
+                method = listing
+            elif isinstance(result.get("messages"), list):
+                method = PROMPTS_GET  # a template: instruction checks, not the full set
             elif _carries_content(msg):
                 method, tool = "tools/call", UNMATCHED
                 self.trace.emit("response_unmatched", id=msg.get("id"))
@@ -216,6 +227,10 @@ class Gate:
         if method == "tools/list":
             self._learn_labels(msg)
             return self._filter_tools(msg) if self.policy.scan_tools else msg
+        if method in LISTINGS:
+            return self._filter_listing(msg, method)
+        if method == PROMPTS_GET:
+            return self._check_prompt(msg, session)
         if method in ("tools/call", RESOURCES_READ):
             if method == RESOURCES_READ and not self.policy.opt(tool, "scan_resources"):
                 return msg  # kill switch: resources/read passes as in 0.9
@@ -259,6 +274,43 @@ class Gate:
         if "serverInfo" in bad:
             clean["serverInfo"] = {"name": "upstream", "version": str(info.get("version", ""))}
         return {**msg, "result": clean}
+
+    def _check_prompt(self, msg: dict, session) -> dict:
+        """prompts/get: a template is instructions by design, so only the
+        high-precision instruction checks run (guards.scan_instruction_text)."""
+        tool = PROMPTS_GET
+        if not (self.policy.scan_prompts and self.policy.opt(tool, "scan_prompts")):
+            return msg
+        decision = guards.scan_instruction_text(self._text_for_scan(msg, tool))
+        if decision.allowed:
+            return msg
+        self.trace.emit("prompt_blocked", id=msg.get("id"), reason=decision.reason)
+        self._bump("prompt_injection_blocked")
+        if self.policy.opt(tool, "on_injected_result") != BLOCK:
+            self._warn(f"bastiongate: WARN {decision.reason}")
+            if self.policy.scan_flows:
+                self.flows.record_result(session, tool, None, untrusted=True, private=False)
+            return msg
+        return jsonrpc.error_response(msg.get("id"), BLOCK_RESULT_CODE, f"bastiongate blocked prompt: {decision.reason}")
+
+    def _filter_listing(self, msg: dict, method: str) -> dict:
+        """resources/list, resources/templates/list, prompts/list: entries whose
+        name/description carry an injection are dropped like poisoned tools."""
+        key = LISTINGS[method]
+        result = msg.get("result")
+        items = result.get(key) if isinstance(result, dict) else None
+        if not (self.policy.scan_tools and self.policy.scan_prompts) or not isinstance(items, list):
+            return msg
+        bad = guards.poisoned_listing_indexes(items)
+        if not bad:
+            return msg
+        names = sorted(str(items[i].get("name", "")) if isinstance(items[i], dict) else "(malformed)" for i in bad)
+        self.trace.emit("listing_poisoned", id=msg.get("id"), method=method, entries=names)
+        self._bump("listing_entries_dropped", len(bad))
+        if self.policy.on_poisoned_tool != BLOCK:
+            self._warn(f"bastiongate: WARN {method} entries carry an injection: {', '.join(names)}")
+            return msg
+        return {**msg, "result": {**result, key: [it for i, it in enumerate(items) if i not in bad]}}
 
     def _learn_labels(self, msg: dict) -> None:
         tools = jsonrpc.tools_from_list_result(msg)

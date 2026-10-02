@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 
 from bastionsupply.models import Server, Tool
@@ -161,6 +163,63 @@ def scan_encoded_text(text: str, views=None, *, transforms: bool = False) -> Dec
     if finding:
         return Decision(False, f"tool result hides an injection ({finding.message})", (finding,))
     return Decision(True, "no encoded injection")
+
+
+_ASCII_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# legitimate invisible characters in prompt text: a joiner inside an emoji sequence
+# ("man" ZWJ "laptop") and a byte-order mark at the very start
+_EMOJI_ZWJ = re.compile("(?<=[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F])\u200D(?=[\U0001F000-\U0001FAFF\u2600-\u27BF])")
+
+
+def _fold(text: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).lower().strip()
+
+
+def scan_instruction_text(text: str, views=None) -> Decision:
+    """Checks for text that is instructions BY DESIGN (a prompt template): only the
+    high-precision ones, so "always do X" never false-positives. Hidden/control
+    unicode, a known bastioncorpus payload, or one hidden in an encoding.
+    (bastionmesh runs the same checks on delegations; it can switch to this one
+    once it pins bastiongateway >= 0.11.)"""
+    if not text:
+        return Decision(True, "empty")
+    from bastionsupply.checks import check_hidden_unicode, decoded_views
+    from bastionsupply.corpus import poison_signatures
+
+    visible = _EMOJI_ZWJ.sub("", text.removeprefix("\ufeff"))
+    if (not visible.isascii() or _ASCII_CONTROL.search(visible)) and \
+            check_hidden_unicode(Server("prompt", (Tool(name="_", description=visible),))):
+        return Decision(False, "prompt carries hidden/control unicode")
+    sigs = poison_signatures()
+    low = _fold(text)
+    if any(phrase in low for _cat, phrase in sigs):
+        return Decision(False, "prompt carries a known prompt-injection payload (bastioncorpus)")
+    for d in (decoded_views(text) if views is None else views):
+        low = _fold(d.text)
+        if any(phrase in low for _cat, phrase in sigs):
+            return Decision(False, f"prompt carries a known prompt-injection payload hidden in {d.encoding} encoding")
+    return Decision(True, "clean prompt")
+
+
+def listing_entry_text(item: dict) -> str:
+    """What a resources/list, resources/templates/list or prompts/list entry shows the
+    model: name, title, description, uri / uriTemplate, prompt argument descriptions."""
+    parts = [item.get(k) for k in ("name", "title", "description", "uri", "uriTemplate")]
+    for arg in item.get("arguments") or [] if isinstance(item.get("arguments"), list) else []:
+        if isinstance(arg, dict):
+            parts += [arg.get("name"), arg.get("description")]
+    return "\n".join(p for p in parts if isinstance(p, str))
+
+
+def poisoned_listing_indexes(items: list) -> set[int]:
+    """Indexes of listing entries to drop: poisoned (same checks as a tool definition),
+    oversize, or malformed (not an object)."""
+    pseudo = [{"name": f"#{i}", "description": listing_entry_text(it)} if isinstance(it, dict) else None
+              for i, it in enumerate(items)]
+    bad = {i for i, p in enumerate(pseudo) if p is None}
+    tools = [p for p in pseudo if p is not None]
+    names = poisoned_tool_names(tools) | oversize_tool_names(tools)
+    return bad | {int(n[1:]) for n in names if n.startswith("#")}
 
 
 def scan_result_text(text: str) -> Decision:
