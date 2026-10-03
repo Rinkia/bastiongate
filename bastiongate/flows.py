@@ -16,8 +16,9 @@ per-session taint record and labels each tool:
 Label precedence: policy `labels` > built-in pack (exact tool name) > auto
 (bastionsupply capability categories; auto only ever yields `egress`).
 
-Ceiling: taint is per session per upstream server. A chain that crosses two MCP
-servers (two gate processes) is not seen; see TODOS.md E4.
+Taint is per session per upstream server, unless gates share a `taint_group`
+(taint_store.py): then every gate in the group also sees the others' taint, so a chain
+that crosses MCP servers (fetch -> filesystem -> fetch) completes the trifecta too.
 """
 
 from __future__ import annotations
@@ -34,11 +35,12 @@ from .policy import GatePolicy
 
 UNTRUSTED, PRIVATE, EGRESS = "untrusted", "private", "egress"
 
-# ponytail: in-memory per-process store; a shared cross-gate store is TODOS.md E4
+# in-memory per-process store; cross-gate sharing is opt-in (taint_store.SharedTaint)
 MAX_TAINT_SESSIONS = 10000
 TAINT_IDLE_SECONDS = 1800
 # ponytail: private sources kept per session; the first one is enough to report
 MAX_PRIVATE_SOURCES = 32
+STORE_MAX_FAILURES = 3  # consecutive shared-store errors before falling back for good
 
 # pii.py kinds that make a forwarded result "private" (credentials, not contact data)
 SECRET_KINDS = frozenset({"private-key", "aws-access-key", "openai-key", "google-api-key",
@@ -141,10 +143,32 @@ class FlowGuard:
     """Per-session taint, bounded (LRU + idle TTL) and separate from the gate's
     request/response correlation table (that one forgets a session once idle)."""
 
-    def __init__(self, bump) -> None:
+    def __init__(self, bump, shared=None, on_shared_error=None) -> None:
         self._taint: OrderedDict = OrderedDict()
         self._lock = threading.Lock()
         self._bump = bump
+        self.shared = shared  # taint_store.SharedTaint or None
+        self._on_shared_error = on_shared_error or (lambda e: None)
+        self._written: set = set()  # (kind, tool, repo) already in the shared store
+        self._store_failures = 0
+
+    def _shared(self, op, *args):
+        """Run a shared-store operation. A store error never breaks the proxy: the
+        check uses local taint only; after STORE_MAX_FAILURES in a row the store is
+        dropped for good (a corrupt or unwritable file, not a passing lock)."""
+        if self.shared is None:
+            return None
+        try:
+            result = op(*args)
+        except Exception as e:  # noqa: BLE001 - sqlite3.Error, OSError, corrupt file...
+            self._store_failures += 1
+            self._bump("taint_store_error")
+            self._on_shared_error(e)
+            if self._store_failures >= STORE_MAX_FAILURES:
+                self.shared = None
+            return None
+        self._store_failures = 0
+        return result
 
     def _live(self, session, now: float) -> Taint | None:
         taint = self._taint.get(session)
@@ -156,6 +180,9 @@ class FlowGuard:
     def reset(self, session) -> None:
         with self._lock:
             self._taint.pop(session, None)
+            self._written.clear()
+        if self.shared is not None:
+            self._shared(self.shared.clear_own)
 
     def touch(self, session) -> None:
         """Any call counts as activity: taint expires only after the session is idle."""
@@ -186,26 +213,44 @@ class FlowGuard:
                 self._bump("taint_evicted")
             self._taint[session] = replace(taint, touched=now)
             self._taint.move_to_end(session)
+            new = [k for k in ((("U", tool, None),) if untrusted else ()) + ((("P", tool, repo),) if private else ())
+                   if k not in self._written]
+            self._written.update(new)
+        for kind, t, r in new:
+            if self.shared is not None:
+                self._shared(self.shared.add, kind, t, r)
 
-    def check(self, session, egress_repo: str | None) -> tuple[str, str] | None:
-        """(untrusted_from, private_from) when an egress call would complete the
-        trifecta. A private read from the same GitHub repo the egress call targets
-        does not count: that is the everyday "fix issue #N" flow, not a leak."""
+    def check(self, session, egress_repo: str | None) -> tuple[str, str, bool] | None:
+        """(untrusted_from, private_from, cross_server) when an egress call would
+        complete the trifecta. A private read from the same GitHub repo the egress
+        call targets does not count: that is the everyday "fix issue #N" flow, not a
+        leak. With a shared store, the group's rows from other gates count too."""
         now = time.monotonic()
         with self._lock:
             taint = self._live(session, now)
-            if taint is None:
+            if taint is not None:
+                self._taint[session] = replace(taint, touched=now)
+                self._taint.move_to_end(session)
+        taint = taint or Taint()
+        rows = self._shared(self.shared.rows) if self.shared is not None else None
+        others = [r for r in rows or () if r.writer != self.shared_writer()]
+        untrusted, cross_u = taint.untrusted_from, False
+        if untrusted is None:
+            first = next((r for r in others if r.kind == "U"), None)
+            if first is None:
                 return None
-            self._taint[session] = replace(taint, touched=now)
-            self._taint.move_to_end(session)
-        if taint.untrusted_from is None:
-            return None
+            untrusted, cross_u = first.source, True
         if taint.private_overflow is not None:
-            return taint.untrusted_from, taint.private_overflow
-        for tool, repo in taint.private:
+            return untrusted, taint.private_overflow, cross_u
+        private = [(tool, repo, False) for tool, repo in taint.private] + \
+                  [(r.source, r.repo, True) for r in others if r.kind == "P"]
+        for tool, repo, cross_p in private:
             if repo is None or egress_repo is None or repo != egress_repo:
-                return taint.untrusted_from, tool
+                return untrusted, tool, cross_u or cross_p
         return None
+
+    def shared_writer(self) -> str | None:
+        return self.shared.writer if self.shared is not None else None
 
     def snapshot(self, session) -> Taint:
         with self._lock:

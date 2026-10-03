@@ -180,9 +180,38 @@ tools:
   create_pull_request: {on_tainted_egress: block}   # per-tool action
 ```
 
+#### Across servers (`taint_group`)
+
+An MCP client runs one gate per server, so by default each gate sees only its own
+server's taint and the common trifecta (read a page through `fetch`, a secret through
+`filesystem`, send it out through `fetch`) passes. Give the gates the same `taint_group`
+and each one also sees the others' taint:
+
+```yaml
+taint_group: auto     # the MCP client that spawned this gate; or a name, e.g. my-agent
+```
+
+- Rows live in one per-user SQLite file (`%LOCALAPPDATA%\bastiongate\taint.sqlite`,
+  `$XDG_STATE_HOME/bastiongate/taint.sqlite`; override with `BASTIONGATE_STATE_DIR`),
+  user-only on POSIX. Each row says `server:tool`, so warnings read
+  `private from filesystem:read_file`; the trace event has `cross_server: true`.
+- `auto` groups the gates one client spawned: on POSIX by process group, on Windows by the
+  nearest ancestor process that is not a launcher (a venv `python.exe`, `py`, `uv`, `uvx`,
+  `cmd`). With an unusual launcher chain, set the same name on every server instead (or
+  env `BASTIONGATE_TAINT_GROUP`).
+- `initialize` clears only this gate's own rows; rows expire after 30 minutes idle; at
+  most 512 rows per group.
+- A store problem (locked, corrupt, unwritable) never breaks the proxy: the check uses
+  this gate's own taint, prints one WARN and counts `taint_store_error`.
+- Off by default; stdio only (`run-http` refuses a `taint_group`: an HTTP gate serves
+  many clients and must not pool their taint).
+
 **Limits.** Taint lives per session per upstream server, in memory:
-- a chain that crosses two MCP servers (two gate processes) is **not** detected
-  (TODOS.md E4);
+- a chain that crosses two MCP servers is detected only when their gates share a
+  `taint_group`; a named group survives a client restart until its rows expire (30
+  minutes idle), so a fresh session can inherit stale taint (warnings, not leaks);
+- any local process running as the same user can write or clear rows in the store
+  (it could equally read the secrets directly);
 - stdio is one session for the process; over HTTP the key is `Mcp-Session-Id`, so
   a client that rotates it starts clean, and one that floods new ids can evict
   other sessions' taint (the `taint_evicted` metric counts it);

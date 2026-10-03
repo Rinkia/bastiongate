@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.0 (unreleased)
+
+- **Cross-server taint (E4), opt-in.** `taint_group: auto | <name>` (or env
+  `BASTIONGATE_TAINT_GROUP`): the flow guard of every gate in the group also sees the
+  others' untrusted and private reads, through a per-user SQLite store, so the trifecta
+  that crosses MCP servers (fetch -> filesystem -> fetch) is caught. Rows name
+  `server:tool` (server name from `initialize`); `tainted_egress` gains `cross_server`.
+  `auto` = the spawning MCP client (POSIX process group; Windows nearest non-launcher
+  ancestor). stdio only; off by default. Store errors fall back to local taint (one
+  WARN, `taint_store_error`).
+- Evidence: live smoke, official MCP SDK 2.2.0 client with two `bastiongate run` processes
+  (fetch-like and filesystem-like servers): with `taint_group: auto` or a name, the egress
+  fetch after a cross-server private read is blocked (-32005, `private_from:
+  fssrv:read_file`); without a group it is forwarded, as before.
+
 ## 0.11.0 (unreleased)
 
 - **BEHAVIOR: prompts and listings are checked** (`scan_prompts`, default true, per-prompt

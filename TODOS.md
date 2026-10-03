@@ -66,7 +66,7 @@ Typical messages (KBs) cost about 1 ms.
 **Priority:** P2
 **Depends on:** gate 0.9.0 flow guard.
 
-### E4: cross-server taint
+### E4: cross-server taint (done in 0.12.0, opt-in `taint_group`; branch feat/cross-server-taint)
 
 **What:** Share flow-guard taint across gate processes, so a chain that reads a secret through server A and sends it out through server B is caught. Two options: a local shared store, or one gate fronting multiple upstreams.
 
