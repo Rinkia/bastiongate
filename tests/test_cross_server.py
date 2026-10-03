@@ -166,6 +166,54 @@ def test_row_cap_is_per_writer(monkeypatch):
     assert len([r for r in rows if r.writer == flood.writer]) == 5
 
 
+def test_private_flood_never_evicts_own_untrusted_row(monkeypatch):
+    monkeypatch.setattr(taint_store, "MAX_ROWS_PER_WRITER", 10)
+    a = taint_store.SharedTaint("g", "srv")
+    a.add("U", "fetch", None)
+    for i in range(70):
+        a.add("P", f"t{i}", None)
+    rows = a.rows()
+    assert len(rows) == 10
+    assert ("U", "srv:fetch") in [(r.kind, r.source) for r in rows]
+    assert [r for r in rows if r.source == "srv:*" and r.kind == "P" and r.repo is None]  # folded, never exempt
+
+
+def test_untrusted_rows_capped_but_present(monkeypatch):
+    a = taint_store.SharedTaint("g", "srv")
+    for i in range(30):
+        a.add("U", f"u{i}", None)
+    u = [r for r in a.rows() if r.kind == "U"]
+    assert len(u) == taint_store.MAX_U_ROWS_PER_WRITER and u[-1].source == "srv:u29"
+
+
+def test_no_write_amplification(monkeypatch):
+    a, _, _ = gate("gh")
+    adds = []
+    real = taint_store.SharedTaint.add
+    monkeypatch.setattr(taint_store.SharedTaint, "add", lambda self, *x: adds.append(x) or real(self, *x))
+    for i in range(6):
+        call(a, "get_file_contents", "secret", mid=i + 1, args={"owner": "o", "repo": f"r{i % 2}"})
+    assert len(adds) == 2  # r0, then r1 (stored as any repo); later results write nothing
+
+
+def test_lazy_restamp_without_heartbeat_thread(monkeypatch):
+    a, trace_a, _ = gate("fetch-server")
+    b, _, _ = gate("fs-server")
+    t = [1_000_000.0]
+    m = [5_000.0]
+    monkeypatch.setattr(taint_store.time, "time", lambda: t[0])
+    from bastiongate import flows
+    monkeypatch.setattr(flows.time, "monotonic", lambda: m[0])
+    call(b, "read_file", "secret")
+    for _ in range(5):  # b keeps working (any call re-stamps lazily), no thread
+        t[0] += 100
+        m[0] += 100
+        b.flows.check(None, None)
+    call(a, "fetch", "page")
+    egress(a)
+    assert any(e == "tainted_egress" for e, _ in trace_a.rows)
+
+
 def test_distinct_repos_collapse_to_one_row():
     store = taint_store.SharedTaint("g", "gh")
     for i in range(50):
@@ -210,10 +258,14 @@ def test_heartbeat_keeps_live_rows_and_stale_rows_drop(monkeypatch):
     a, trace_a, _ = gate("fetch-server")
     b, _, _ = gate("fs-server")
     t = [1_000_000.0]
+    m = [5_000.0]
+    from bastiongate import flows
     monkeypatch.setattr(taint_store.time, "time", lambda: t[0])
+    monkeypatch.setattr(flows.time, "monotonic", lambda: m[0])
     call(b, "read_file", "secret")
     for _ in range(5):  # 5 minutes of b alive and tainted: it keeps re-stamping
         t[0] += taint_store.HEARTBEAT_SECONDS
+        m[0] += taint_store.HEARTBEAT_SECONDS
         b.flows.heartbeat()
     call(a, "fetch", "page")
     egress(a)

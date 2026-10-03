@@ -42,6 +42,7 @@ TAINT_IDLE_SECONDS = 1800
 MAX_PRIVATE_SOURCES = 32
 STORE_MAX_FAILURES = 3  # consecutive hard shared-store errors before falling back for good
 MAX_WRITTEN = 256  # (kind, tool) sources remembered as already in the shared store
+_ANY_REPO = "*"  # a source already stored as read from several repos (never exempt)
 
 # pii.py kinds that make a forwarded result "private" (credentials, not contact data)
 SECRET_KINDS = frozenset({"private-key", "aws-access-key", "openai-key", "google-api-key",
@@ -152,6 +153,7 @@ class FlowGuard:
         self._on_shared_error = on_shared_error or (lambda e: None)
         self._written: dict = {}  # (kind, tool) -> repo already in the shared store
         self._store_failures = 0
+        self._stamped = 0.0  # monotonic time of the last write/re-stamp of our rows
 
     def _shared(self, op, *args):
         """Run a shared-store operation; returns (ok, result). A store error never
@@ -180,11 +182,17 @@ class FlowGuard:
     def heartbeat(self) -> None:
         """Re-stamp this gate's shared rows while its own taint is live, so other gates
         keep seeing them; once it expires (or the gate dies) they go stale."""
+        from .taint_store import HEARTBEAT_SECONDS
+
         now = time.monotonic()
         with self._lock:
             live = any(self._live(s, now) is not None for s in list(self._taint))
-        if live and self.shared is not None:
-            self._shared(self.shared.heartbeat)
+            due = now - self._stamped >= HEARTBEAT_SECONDS
+        shared = self.shared  # read once: another thread may drop it
+        if live and due and shared is not None:
+            ok, _ = self._shared(shared.heartbeat)
+            if ok:
+                self._stamped = now
 
     def _live(self, session, now: float) -> Taint | None:
         taint = self._taint.get(session)
@@ -230,15 +238,23 @@ class FlowGuard:
             self._taint[session] = replace(taint, touched=now)
             self._taint.move_to_end(session)
             wanted = ((("U", tool, None),) if untrusted else ()) + ((("P", tool, repo),) if private else ())
-            new = [(k, t, r) for k, t, r in wanted if self._written.get((k, t), "-") != r]
+            new = []
+            for k, t, r in wanted:
+                have = self._written.get((k, t), "-")
+                if have == _ANY_REPO or have == r:
+                    continue  # already stored as is (or as "any repo", which covers it)
+                if have == "-" and len(self._written) >= MAX_WRITTEN:
+                    continue  # past the per-writer row cap the store folds it in anyway
+                new.append((k, t, r))
+        shared = self.shared
         for kind, t, r in new:
-            ok, _ = self._shared(self.shared.add, kind, t, r) if self.shared is not None else (False, None)
+            ok, _ = self._shared(shared.add, kind, t, r) if shared is not None else (False, None)
             if ok:  # remembered only once written: a failed write is retried next time
                 with self._lock:
-                    if (kind, t) in self._written or len(self._written) < MAX_WRITTEN:
-                        # a second repo for the same source is stored as "any repo" (None)
-                        prev = self._written.get((kind, t), r)
-                        self._written[(kind, t)] = r if prev == r else None
+                    have = self._written.get((kind, t), r)
+                    self._written[(kind, t)] = r if have == r else _ANY_REPO
+                    self._stamped = time.monotonic()
+        self.heartbeat()  # embedders without the heartbeat thread still re-stamp
 
     def check(self, session, egress_repo: str | None) -> tuple[str, str, bool] | None:
         """(untrusted_from, private_from, cross_server) when an egress call would
@@ -252,7 +268,13 @@ class FlowGuard:
                 self._taint[session] = replace(taint, touched=now)
                 self._taint.move_to_end(session)
         taint = taint or Taint()
-        rows = self._shared(self.shared.rows)[1] if self.shared is not None else None
+        rows = None
+        for _attempt in range(2):  # a busy read is retried once before local-only
+            shared = self.shared
+            ok, rows = self._shared(shared.rows) if shared is not None else (True, None)
+            if ok:
+                break
+        self.heartbeat()
         others = [r for r in rows or () if r.writer != self.shared_writer()]
         untrusted, cross_u = taint.untrusted_from, False
         if untrusted is None:

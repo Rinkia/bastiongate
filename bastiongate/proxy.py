@@ -287,8 +287,11 @@ class Gate:
 
         def beat() -> None:
             while True:
-                time.sleep(taint_store.HEARTBEAT_SECONDS)
-                self.flows.heartbeat()
+                time.sleep(taint_store.HEARTBEAT_SECONDS / 2)
+                try:
+                    self.flows.heartbeat()
+                except Exception:  # noqa: BLE001 - the heartbeat must never die silently
+                    self._bump("taint_heartbeat_error")
 
         threading.Thread(target=beat, name="bastiongate-taint-heartbeat", daemon=True).start()
 

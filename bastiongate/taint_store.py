@@ -12,7 +12,9 @@ their taint to one per-user SQLite file and read the group's rows on every egres
             redirector directly above this interpreter)
     rows    one per (writer, kind U|P, source "server:tool"); a source read from several
             repos keeps repo NULL (never exempt). A writer holds at most MAX_ROWS_PER_WRITER
-            rows, so one gate can never flood out the others' taint
+            rows, so one gate can never flood out the others' taint; past the cap its oldest
+            private rows fold into one "server:*" row (never exempt) and untrusted rows are
+            never evicted by private ones
     life    live writers re-stamp their rows every HEARTBEAT_SECONDS while their own taint
             is live; rows not re-stamped for STALE_SECONDS belong to a dead or idle gate and
             are ignored (a crashed client's taint never blocks the next session for long);
@@ -28,6 +30,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -36,6 +39,7 @@ from pathlib import Path
 HEARTBEAT_SECONDS = 60
 STALE_SECONDS = 180  # 3 missed heartbeats: the writer is gone or its taint expired
 MAX_ROWS_PER_WRITER = 64
+MAX_U_ROWS_PER_WRITER = 8  # one untrusted source is enough to taint; a few name it
 MAX_ROWS_TOTAL = 20_000  # the whole file, all groups
 GROUP_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 WRITE_TIMEOUT = 1.0  # seconds to wait for another gate's write lock
@@ -106,7 +110,8 @@ def _auto_group() -> str:
         procs = _windows_processes()
         own_image = procs.get(os.getpid(), (0, ""))[1]
         parent, image = procs.get(pid, (0, ""))
-        if image and image == own_image and parent:  # the venv redirector right above us
+        in_venv = sys.prefix != sys.base_prefix  # only a venv interpreter has a redirector parent
+        if in_venv and image and image == own_image and parent:
             pid = parent
         for _ in range(16):  # ponytail: bounded walk; a deeper launcher chain stops here
             parent, image = procs.get(pid, (0, ""))
@@ -169,12 +174,31 @@ class SharedTaint:
             else:
                 db.execute("UPDATE taint SET ts = ?, repo = ? WHERE rowid = ?",
                            (now, old[1] if old[1] == repo else None, old[0]))
-            db.execute("DELETE FROM taint WHERE writer = ? AND rowid NOT IN (SELECT rowid FROM taint "
-                       "WHERE writer = ? ORDER BY ts DESC, rowid DESC LIMIT ?)",
-                       (self.writer, self.writer, MAX_ROWS_PER_WRITER))
+            self._cap_writer(db, now)
             db.execute("DELETE FROM taint WHERE rowid NOT IN (SELECT rowid FROM taint "
                        "ORDER BY ts DESC, rowid DESC LIMIT ?)", (MAX_ROWS_TOTAL,))
             db.execute("COMMIT")
+
+    def _cap_writer(self, db: sqlite3.Connection, now: float) -> None:
+        """Keep this writer under MAX_ROWS_PER_WRITER without ever losing its signal:
+        at most MAX_U_ROWS_PER_WRITER untrusted rows (oldest dropped, the newest still
+        taints), and the oldest private rows fold into one "<server>:*" row."""
+        overflow = f"{self.server}:*"
+        db.execute("DELETE FROM taint WHERE writer = ? AND kind = 'U' AND rowid NOT IN (SELECT rowid FROM taint "
+                   "WHERE writer = ? AND kind = 'U' ORDER BY ts DESC, rowid DESC LIMIT ?)",
+                   (self.writer, self.writer, MAX_U_ROWS_PER_WRITER))
+        (count,) = db.execute("SELECT COUNT(*) FROM taint WHERE writer = ?", (self.writer,)).fetchone()
+        if count <= MAX_ROWS_PER_WRITER:
+            return
+        has_overflow = db.execute("SELECT 1 FROM taint WHERE writer = ? AND source = ?",
+                                  (self.writer, overflow)).fetchone() is not None
+        extra = count - MAX_ROWS_PER_WRITER + (0 if has_overflow else 1)
+        db.execute("DELETE FROM taint WHERE rowid IN (SELECT rowid FROM taint WHERE writer = ? AND kind = 'P' "
+                   "AND source != ? ORDER BY ts, rowid LIMIT ?)", (self.writer, overflow, extra))
+        if has_overflow:
+            db.execute("UPDATE taint SET ts = ? WHERE writer = ? AND source = ?", (now, self.writer, overflow))
+        else:
+            db.execute("INSERT INTO taint VALUES (?, ?, 'P', ?, NULL, ?)", (self.group, self.writer, overflow, now))
 
     def heartbeat(self) -> None:
         """Re-stamp this writer's rows: they stay live while this gate's taint is."""

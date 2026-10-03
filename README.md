@@ -197,13 +197,14 @@ taint_group: auto     # the MCP client that spawned this gate; or a name, e.g. m
   `private from filesystem:read_file`; the trace event has `cross_server: true`.
 - `auto` groups the gates one client spawned: on POSIX by process group, on Windows by the
   nearest ancestor process that is not a launcher (`py`, `uv`, `uvx`, `cmd`, a console-script
-  shim, or the venv `python.exe` redirector right above the gate). The resolved group is in
+  shim, or the venv `python.exe` redirector right above a venv gate). The resolved group is in
   the trace (`taint_group` event). `auto` can merge two clients started from one shell job
   (POSIX) or miss a client that detaches its servers; a name set on every server entry is
   the reliable path (or env `BASTIONGATE_TAINT_GROUP`).
 - Each gate keeps one row per tainting source (`server:tool`, at most 64 per gate), so one
-  gate can never flood out the others' taint; a source read from several repos is never
-  exempt.
+  gate can never flood out the others' taint; past 64, its oldest private rows fold into one
+  `server:*` row and its untrusted rows are never pushed out by private ones. A source read
+  from several repos is never exempt.
 - A live gate re-stamps its rows every minute while its own taint is live; rows not
   re-stamped for 3 minutes (the gate died, or its taint expired after 30 minutes idle) are
   ignored, so a crashed client's taint does not block the next session for long.

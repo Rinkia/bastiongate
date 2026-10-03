@@ -15,7 +15,10 @@
   never disables sharing; live gates re-stamp their rows and stale rows (dead or idle
   gates) are ignored after 3 minutes; `auto` no longer treats a Python MCP client as a
   launcher; the env group name is validated; the state directory mode is set only when the
-  gate creates it.
+  gate creates it. Second round: a gate's own private flood can no longer evict its
+  untrusted row (private overflow folds into one `server:*` row); no repeated writes for a
+  source already stored; rows are re-stamped on activity even without the heartbeat
+  thread; a busy read is retried once.
 - Evidence: live smoke, official MCP SDK 2.2.0 client with two `bastiongate run` processes
   (fetch-like and filesystem-like servers): with `taint_group: auto` or a name, the egress
   fetch after a cross-server private read is blocked (-32005, `private_from:
