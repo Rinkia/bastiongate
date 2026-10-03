@@ -128,6 +128,13 @@ def result_text(msg: dict, *, resources: bool = True) -> str:
     if resources and isinstance(contents, list):
         for res in contents:
             parts.extend(resource_texts(res))
+    messages = result.get("messages")  # prompts/get
+    if isinstance(result.get("description"), str):
+        parts.append(result["description"])
+    for m in messages if isinstance(messages, list) else []:
+        content = m.get("content") if isinstance(m, dict) else None
+        for block in content if isinstance(content, list) else [content]:
+            parts.extend(_block_texts(block, resources))
     return "\n".join(parts)
 
 
