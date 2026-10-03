@@ -175,13 +175,18 @@ _JOINERS = re.compile("[\u200C\u200D]")
 # supplement) after one character is a known steganography channel
 _VS_STEGO = re.compile("[\U000E0100-\U000E01EF]|[\uFE00-\uFE0F]{2,}")
 _MARKUP = re.compile(r"[*_`~|>#]+")
+# scripts where ZWJ/ZWNJ are ordinary spelling (Indic, Arabic-script and a few others);
+# NOT Cyrillic/Greek/Latin, where a joiner between letters only hides text
+_JOINER_SCRIPTS = ("DEVANAGARI", "BENGALI", "GURMUKHI", "GUJARATI", "ORIYA", "TAMIL", "TELUGU",
+                   "KANNADA", "MALAYALAM", "SINHALA", "ARABIC", "SYRIAC", "MYANMAR", "KHMER",
+                   "TIBETAN", "MONGOLIAN", "THAANA", "NKO")
 PROMPT_SCAN_MAX_CHARS = 1_000_000  # bigger prompts are not scanned: they fail closed under block
 
 
 def _script_letter(c: str) -> bool:
-    """A letter or combining mark outside ASCII: ZWJ/ZWNJ between two of these is
-    ordinary Indic/Arabic/Persian orthography, not hidden text."""
-    return not c.isascii() and unicodedata.category(c)[0] in "LM"
+    """A letter or combining mark of a script where ZWJ/ZWNJ between two of them is
+    ordinary orthography (Indic, Arabic, Persian...), not hidden text."""
+    return unicodedata.category(c)[0] in "LM" and unicodedata.name(c, "").startswith(_JOINER_SCRIPTS)
 
 
 def _drop_script_joiners(text: str) -> str:
@@ -204,8 +209,8 @@ def _confusables():
 def _fold(text: str) -> str:
     """NFKC, lowercase, look-alike letters to Latin, markdown emphasis removed,
     whitespace collapsed: `**Ignоre** all previous` matches `ignore all previous`."""
-    text = unicodedata.normalize("NFKC", text).lower().translate(_confusables())
-    return re.sub(r"\s+", " ", _MARKUP.sub("", text)).strip()
+    text = _JOINERS.sub("", unicodedata.normalize("NFKC", text)).lower().translate(_confusables())
+    return re.sub(r"\s+", " ", _MARKUP.sub(" ", text)).strip()
 
 
 @functools.lru_cache(maxsize=1)

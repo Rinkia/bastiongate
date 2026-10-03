@@ -305,7 +305,12 @@ tools:
 flagged, and a known phrase with words inserted or reordered is missed: that is the price of
 no false positives on real templates (0 of 1,015 skill and agent files flagged as prompts; the
 one hit was stray byte-order marks and a zero-width space inside a CHANGELOG). With
-`scan_resources: false`, resources embedded in prompts are not read.
+`scan_resources: false`, resources embedded in prompts are not read. Phrase matching is
+evaded by words joined with `_` or `-`, inserted commas or HTML tags, combining marks and
+leetspeak. A `prompts/get` error, or a listing/prompt result that also carries `content`,
+`structuredContent` or prompt `messages` it should not have, gets the full result checks,
+so an error message with imperative wording ("Always call prompts/list first") can be
+blocked like a tool error.
 
 ### Argument PII/secret scrub
 

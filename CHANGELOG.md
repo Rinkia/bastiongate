@@ -19,6 +19,10 @@
   payloads match through look-alike letters, markdown emphasis and a dropped final period;
   ZWJ/ZWNJ in Indic and Arabic-script text no longer false-positive; prompts over 1M
   characters fail closed under block.
+- Second review round: a `tools/list` or listing response that also carries `messages` or
+  tool-result content gets the full result checks; ZWJ/ZWNJ are exempt only in scripts that
+  spell with them (Indic, Arabic-script...), never between Cyrillic/Latin homoglyphs, and are
+  removed before phrase matching.
 
 ## 0.10.0 (unreleased)
 

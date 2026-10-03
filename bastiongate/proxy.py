@@ -230,7 +230,7 @@ class Gate:
             # a listing that ALSO carries tool-result content gets the full result checks
             method, tool = "tools/call", tool or method
         elif method == PROMPTS_GET:
-            if not _carries_content(msg):
+            if not _carries_content(msg, messages=False):
                 return self._check_prompt(msg, session)
             # content/contents/structuredContent or an error is data, not a template:
             # the full result checks (one extra key must never downgrade the scan)
@@ -240,7 +240,10 @@ class Gate:
             return self._check_instructions(msg)
         if method == "tools/list":
             self._learn_labels(msg)
-            return self._filter_tools(msg) if self.policy.scan_tools else msg
+            msg = self._filter_tools(msg) if self.policy.scan_tools else msg
+            if not _carries_content(msg):
+                return msg
+            method, tool = "tools/call", tool or "tools/list"  # extra content keys: full result checks
         if method in ("tools/call", RESOURCES_READ):
             if method == RESOURCES_READ and not self.policy.opt(tool, "scan_resources"):
                 return msg  # kill switch: resources/read passes as in 0.9
@@ -564,11 +567,15 @@ class Gate:
             return (entry[0], entry[1], entry[3])
 
 
-def _carries_content(msg: dict) -> bool:
+def _carries_content(msg: dict, *, messages: bool = True) -> bool:
+    """Anything besides the method's own shape that the model could read: tool-result
+    content, an error, or (outside prompts/get) prompt messages. One extra key must
+    never route a response to a weaker check or past every check."""
     if msg.get("error") is not None:
         return True
     result = msg.get("result")
-    return isinstance(result, dict) and any(k in result for k in ("content", "contents", "structuredContent"))
+    keys = ("content", "contents", "structuredContent") + (("messages",) if messages else ())
+    return isinstance(result, dict) and any(k in result for k in keys)
 
 
 def _session_hash(session) -> str | None:
