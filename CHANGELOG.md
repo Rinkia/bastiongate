@@ -2,6 +2,9 @@
 
 ## 0.13.0 (unreleased)
 
+- With `scrub_results`, secrets in text blobs (decoded, redacted, re-encoded) and in
+  `resource_link` name/title/description are redacted too; URIs are also scanned
+  percent-decoded (review follow-ups).
 - **OpenTelemetry GenAI spans (T3).** `--otel-out FILE` (OTLP/JSON lines) and/or
   `--otel-endpoint URL` (OTLP/HTTP JSON, https or loopback http, headers from
   `OTEL_EXPORTER_OTLP_HEADERS`) emit one `execute_tool` span per `tools/call` with the gate's

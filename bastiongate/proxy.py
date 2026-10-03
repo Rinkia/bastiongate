@@ -8,6 +8,7 @@ stdin/stdout) and a spawned upstream MCP server.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -536,13 +537,33 @@ class Gate:
 
         resources = self.policy.opt(tool or "", "scan_resources")
 
-        def scrub_res(res):  # resource.text only; blobs are never rewritten (README Limits)
-            if resources and isinstance(res, dict) and isinstance(res.get("text"), str):
+        def scrub_res(res):
+            """resource.text, and a blob that decodes to text (re-encoded after redaction)."""
+            if not (resources and isinstance(res, dict)):
+                return res
+            out = res
+            if isinstance(res.get("text"), str):
                 red, found = pii.scrub_text(res["text"])
                 if found:
                     kinds.extend(found)
-                    return {**res, "text": red}
-            return res
+                    out = {**out, "text": red}
+            text = jsonrpc.blob_text(res)
+            if text is not None:
+                red, found = pii.scrub_text(text)
+                if found:
+                    kinds.extend(found)
+                    out = {**out, "blob": base64.b64encode(red.encode("utf-8")).decode("ascii")}
+            return out
+
+        def scrub_link(b):
+            out = b
+            for k in ("name", "title", "description"):
+                if isinstance(b.get(k), str):
+                    red, found = pii.scrub_text(b[k])
+                    if found:
+                        kinds.extend(found)
+                        out = {**out, k: red}
+            return out
 
         blocks = result.get("content")
         if isinstance(blocks, list):
@@ -557,6 +578,8 @@ class Gate:
                     res = scrub_res(b.get("resource"))
                     if res is not b.get("resource"):
                         b = {**b, "resource": res}
+                elif isinstance(b, dict) and b.get("type") == "resource_link" and resources:
+                    b = scrub_link(b)
                 new_blocks.append(b)
             new_result["content"] = new_blocks
         contents = result.get("contents")

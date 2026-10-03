@@ -315,7 +315,9 @@ tools:
 responses through entirely (no scan, scrub or taint), as in 0.9.
 
 **Limits:**
-- The PII scrub redacts `resource.text` but never rewrites a blob or a `resource_link`.
+- The PII scrub redacts `resource.text`, a blob that decodes to text (re-encoded after
+  redaction) and `resource_link` name/title/description; media blobs and URIs are never
+  rewritten. URIs are scanned both as sent and percent-decoded.
 - Media blobs (images, audio, PDF...) are not inspected: the model receives them as media.
 
 ### Prompts and listings (`scan_prompts`)
