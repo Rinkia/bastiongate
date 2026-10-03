@@ -76,7 +76,7 @@ Typical messages (KBs) cost about 1 ms.
 **Priority:** P2
 **Depends on:** gate 0.9.0.
 
-### T3: gate as an OTel GenAI span producer
+### T3: gate as an OTel GenAI span producer (done in 0.13.0, branch feat/otel-spans)
 
 **What:** Emit `execute_tool` spans with hashed content plus verdict attributes, so gate plugs into existing observability stacks and bastiontrace gets traces the suite guarantees exist.
 

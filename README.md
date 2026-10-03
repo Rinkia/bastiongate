@@ -362,6 +362,37 @@ the tool — API keys, AWS/GitHub/Slack tokens, private keys, JWTs, emails, SSNs
 and Luhn-valid card numbers. `on_pii_arg: block` refuses the call instead;
 `warn` only logs. Only the *kind* is ever logged, never the value.
 
+### OpenTelemetry spans (`--otel-out`, `--otel-endpoint`)
+
+The gate can emit one OTel GenAI `execute_tool` span per `tools/call`, with its verdict, so
+traces exist even when the agent framework exports none, and they plug into any OTLP backend
+(Jaeger, Tempo, Honeycomb, Langfuse...) or straight into bastiontrace:
+
+```bash
+bastiongate run --otel-out spans.jsonl -- npx -y @modelcontextprotocol/server-filesystem ~/notes
+bastiongate run --otel-endpoint http://127.0.0.1:4318 -- ...   # OTLP/HTTP collector
+bastiontrace analyze --otel spans.jsonl --forbid send_email     # forensics on the gate's own spans
+```
+
+- Attributes: `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`,
+  `server.address`, `bastion.gate.verdict` (forwarded | warned | blocked | error),
+  `bastion.gate.code`, `bastion.gate.checks` (the gate's trace events for the call),
+  `bastion.gate.tainted_egress`.
+- Content: by default only `bastion.gate.args_sha256` / `result_sha256`. With
+  `--otel-content`, `gen_ai.tool.call.arguments` / `.result` (what the agent got) are added,
+  PII-scrubbed and capped at 16 KB each; a blocked call also carries the server's text as
+  `bastion.gate.upstream_result` (evidence, kept out of the result the agent "read").
+- One trace per gate session (stdio run, or HTTP `Mcp-Session-Id`).
+- The file is OTLP/JSON, one export object per line (the Collector file exporter format).
+  The endpoint gets OTLP/HTTP JSON at `/v1/traces`, https or http on loopback only,
+  redirects never followed, headers from `OTEL_EXPORTER_OTLP_HEADERS`.
+- Export never blocks the proxy: spans queue (at most 10,000; drops are counted) and flush
+  every 2 seconds and at exit; a failed POST drops that batch.
+
+**Limits:** stdlib only, so no gRPC and no sampling; the client's own trace context is not
+joined (MCP has no standard header for it); a process killed hard loses the last 2 seconds
+of spans.
+
 ### HTTP transport
 
 For MCP Streamable-HTTP servers, run the gate as an HTTP proxy instead:

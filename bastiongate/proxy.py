@@ -21,7 +21,7 @@ from collections import Counter, OrderedDict, deque
 from . import flows, guards, jsonrpc, pii, taint_store
 from .inspectors import make_inspector
 from .policy import BLOCK, REDACT, WARN, GatePolicy
-from .trace import Trace
+from .trace import TeeTrace, Trace
 
 BLOCK_TOOL_CODE = -32001
 BLOCK_RESULT_CODE = -32002
@@ -48,9 +48,13 @@ def _stderr_warn(line: str) -> None:
 
 class Gate:
     def __init__(self, policy: GatePolicy, trace: Trace | None = None, *,
-                 warn=_stderr_warn, transport: str = "stdio", server_name: str = "upstream") -> None:
+                 warn=_stderr_warn, transport: str = "stdio", server_name: str = "upstream",
+                 otel=None) -> None:
         self.policy = policy
+        self.otel = otel  # otel.OtelSink or None: one execute_tool span per tools/call
         self.trace = trace or Trace(None)
+        if otel is not None:
+            self.trace = TeeTrace(self.trace, otel.on_event)
         self._warn = warn  # operator-visible one-liners (stderr by default)
         self._transport = transport  # stdio: one process session | http: per Mcp-Session-Id
         self._warned_once: set[str] = set()
@@ -84,6 +88,17 @@ class Gate:
         `session` scopes request/response correlation so one Gate serving many
         HTTP sessions cannot cross-correlate on a reused JSON-RPC id.
         """
+        if self.otel is None or not jsonrpc.is_request(msg) or jsonrpc.method_of(msg) != "tools/call":
+            return self._handle_client_msg(msg, session)
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        with self.otel.collect(session, msg.get("id")):
+            forward, reply = self._handle_client_msg(msg, session)
+            sent = (forward or msg).get("params") or {}
+            self.otel.call_started(session, msg.get("id"), params.get("name", ""),
+                                   sent.get("arguments") if isinstance(sent, dict) else None, reply)
+        return forward, reply
+
+    def _handle_client_msg(self, msg: dict, session=None) -> tuple[dict | None, dict | None]:
         if not jsonrpc.is_request(msg):
             return msg, None
         method = jsonrpc.method_of(msg)
@@ -201,6 +216,14 @@ class Gate:
         is replaced by an error: it never crashes the proxy and is never forwarded."""
         if not jsonrpc.is_response(msg):
             return msg
+        if self.otel is not None:
+            with self.otel.collect(session, msg.get("id")):
+                out = self._handle_response_safe(msg, session)
+                self.otel.call_ended(session, msg.get("id"), out, upstream=msg)
+            return out
+        return self._handle_response_safe(msg, session)
+
+    def _handle_response_safe(self, msg: dict, session) -> dict:
         try:
             return self._handle_response(msg, session)
         except Exception as e:  # noqa: BLE001 - fail closed on anything unexpected
@@ -625,11 +648,13 @@ def _session_hash(session) -> str | None:
     return hashlib.sha256(str(session).encode("utf-8")).hexdigest()[:12]
 
 
-def run_stdio(server_argv: list[str], policy: GatePolicy, log_path: str | None = None) -> int:
+def run_stdio(server_argv: list[str], policy: GatePolicy, log_path: str | None = None, otel=None) -> int:
     """Run the gate between this process's stdio and a spawned MCP server."""
     trace = Trace(log_path)
     name = re.sub(r"[^A-Za-z0-9_.:-]", "", os.path.splitext(os.path.basename(server_argv[-1]))[0])[:64]
-    gate = Gate(policy, trace, server_name=name or "upstream")  # initialize's serverInfo.name wins
+    if otel is not None:
+        otel.server = name or "upstream"
+    gate = Gate(policy, trace, server_name=name or "upstream", otel=otel)  # initialize's serverInfo.name wins
     gate.start_heartbeat()
     proc = subprocess.Popen(
         server_argv,

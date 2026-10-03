@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.0 (unreleased)
+
+- **OpenTelemetry GenAI spans (T3).** `--otel-out FILE` (OTLP/JSON lines) and/or
+  `--otel-endpoint URL` (OTLP/HTTP JSON, https or loopback http, headers from
+  `OTEL_EXPORTER_OTLP_HEADERS`) emit one `execute_tool` span per `tools/call` with the gate's
+  verdict (`bastion.gate.verdict|code|checks|tainted_egress`). Hashes by default;
+  `--otel-content` adds PII-scrubbed, capped arguments and results. One trace per gate
+  session. Stdlib only; export never blocks the proxy. Off by default.
+- Evidence: live smoke, official MCP SDK 2.2.0 client through `bastiongate run --otel-out
+  --otel-content` (a page tool returning an injection under warn, then `send_email`):
+  `bastiontrace analyze --otel` on the gate's file reports LANDED (inject in `fetch_page`,
+  landing on `send_email`), with the AWS key in the payload redacted in the file.
+
 ## 0.12.0 (unreleased)
 
 - **Cross-server taint (E4), opt-in.** `taint_group: auto | <name>` (or env

@@ -298,7 +298,7 @@ def _transform_sse_event(lines: list[str], transform) -> str:
 
 def run_http(upstream: str, policy: GatePolicy, host: str = "127.0.0.1",
              port: int = 9000, log_path: str | None = None,
-             auth_key: str | None = None) -> int:
+             auth_key: str | None = None, otel=None) -> int:
     """Serve the gate in front of `upstream` until interrupted."""
     if policy.taint_group:
         from .policy import PolicyError
@@ -309,7 +309,7 @@ def run_http(upstream: str, policy: GatePolicy, host: str = "127.0.0.1",
     if scheme not in ("http", "https"):
         raise ValueError(f"upstream must be http/https, got {scheme!r}")
     trace = Trace(log_path)
-    gate = Gate(policy, trace, transport="http")
+    gate = Gate(policy, trace, transport="http", otel=otel)
     httpd = ThreadingHTTPServer((host, port), make_handler(upstream, gate, trace, auth_key))
     trace.emit("gate_http_start", upstream=upstream, listen=f"{host}:{port}", auth=bool(auth_key))
     try:
