@@ -12,6 +12,7 @@ import functools
 import json
 import re
 import unicodedata
+import urllib.parse
 from dataclasses import dataclass
 
 from bastionsupply.models import Server, Tool
@@ -252,6 +253,7 @@ def listing_entry_text(item: dict) -> str:
     """What a resources/list, resources/templates/list or prompts/list entry shows the
     model: name, title, description, uri / uriTemplate, prompt argument descriptions."""
     parts = [item.get(k) for k in ("name", "title", "description", "uri", "uriTemplate")]
+    parts += [urllib.parse.unquote(item[k]) for k in ("uri", "uriTemplate") if isinstance(item.get(k), str)]
     for arg in item.get("arguments") or [] if isinstance(item.get("arguments"), list) else []:
         if isinstance(arg, dict):
             parts += [arg.get("name"), arg.get("title"), arg.get("description")]

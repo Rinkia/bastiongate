@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.13.0 (unreleased)
+
+- With `scrub_results`, secrets in text blobs (decoded, redacted, re-encoded) and in
+  `resource_link` name/title/description are redacted too; URIs are also scanned
+  percent-decoded (review follow-ups).
+- **OpenTelemetry GenAI spans (T3).** `--otel-out FILE` (OTLP/JSON lines) and/or
+  `--otel-endpoint URL` (OTLP/HTTP JSON, https or loopback http, headers from
+  `OTEL_EXPORTER_OTLP_HEADERS`) emit one `execute_tool` span per `tools/call` with the gate's
+  verdict (`bastion.gate.verdict|code|checks|tainted_egress`). Hashes by default;
+  `--otel-content` adds PII-scrubbed, capped arguments and results. One trace per gate
+  session. Stdlib only; export never blocks the proxy. Off by default.
+- Security review (2026-10-03) fixes before release: odd JSON-RPC ids (lists, objects) and
+  lone surrogates in tool names can no longer crash the response pump or the exporter;
+  digests are keyed (HMAC) and taken after secret-key and PII redaction; secret-named
+  argument fields are redacted in content; the endpoint refuses credentials, query and
+  fragment, ignores proxy env vars and has a total POST deadline; bad OTLP headers fail at
+  start; export failures print one WARN; the spans file is 0600; a server error is never
+  labelled as a gate block. Second round: one collector POST in flight at most (no thread
+  pile-up under a slow collector); arguments over 1M characters are digested, not scrubbed
+  or exported; more secret-named keys; type-tagged id keys; a reused id drops the open span
+  instead of misattributing it.
+- Evidence: live smoke, official MCP SDK 2.2.0 client through `bastiongate run --otel-out
+  --otel-content` (a page tool returning an injection under warn, then `send_email`):
+  `bastiontrace analyze --otel` on the gate's file reports LANDED (inject in `fetch_page`,
+  landing on `send_email`), with the AWS key in the payload redacted in the file.
+
 ## 0.12.0 (unreleased)
 
 - **Cross-server taint (E4), opt-in.** `taint_group: auto | <name>` (or env
