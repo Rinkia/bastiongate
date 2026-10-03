@@ -11,6 +11,13 @@
   verdict (`bastion.gate.verdict|code|checks|tainted_egress`). Hashes by default;
   `--otel-content` adds PII-scrubbed, capped arguments and results. One trace per gate
   session. Stdlib only; export never blocks the proxy. Off by default.
+- Security review (2026-10-03) fixes before release: odd JSON-RPC ids (lists, objects) and
+  lone surrogates in tool names can no longer crash the response pump or the exporter;
+  digests are keyed (HMAC) and taken after secret-key and PII redaction; secret-named
+  argument fields are redacted in content; the endpoint refuses credentials, query and
+  fragment, ignores proxy env vars and has a total POST deadline; bad OTLP headers fail at
+  start; export failures print one WARN; the spans file is 0600; a server error is never
+  labelled as a gate block.
 - Evidence: live smoke, official MCP SDK 2.2.0 client through `bastiongate run --otel-out
   --otel-content` (a page tool returning an injection under warn, then `send_email`):
   `bastiontrace analyze --otel` on the gate's file reports LANDED (inject in `fetch_page`,

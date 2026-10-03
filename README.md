@@ -380,16 +380,23 @@ bastiontrace analyze --otel spans.jsonl --forbid send_email     # forensics on t
   `server.address`, `bastion.gate.verdict` (forwarded | warned | blocked | error),
   `bastion.gate.code`, `bastion.gate.checks` (the gate's trace events for the call),
   `bastion.gate.tainted_egress`.
-- Content: by default only `bastion.gate.args_sha256` / `result_sha256`. With
-  `--otel-content`, `gen_ai.tool.call.arguments` / `.result` (what the agent got) are added,
-  PII-scrubbed and capped at 16 KB each; a blocked call also carries the server's text as
-  `bastion.gate.upstream_result` (evidence, kept out of the result the agent "read").
+- Content: by default only `bastion.gate.args_hmac` / `result_hmac` (HMAC-SHA256 with a
+  per-process key: they correlate calls within one gate run but cannot be used to guess a
+  short secret). With `--otel-content`, `gen_ai.tool.call.arguments` / `.result` (what the
+  agent got, `structuredContent` included) are added with secret-named fields (`password`,
+  `token`, `api_key`, `pin`...) and PII redacted, capped at 16 KB each; a blocked call also
+  carries the server's text as `bastion.gate.upstream_result` (evidence, kept out of the
+  result the agent "read"). Point `--otel-content` only at a collector you trust.
 - One trace per gate session (stdio run, or HTTP `Mcp-Session-Id`).
-- The file is OTLP/JSON, one export object per line (the Collector file exporter format).
-  The endpoint gets OTLP/HTTP JSON at `/v1/traces`, https or http on loopback only,
-  redirects never followed, headers from `OTEL_EXPORTER_OTLP_HEADERS`.
-- Export never blocks the proxy: spans queue (at most 10,000; drops are counted) and flush
-  every 2 seconds and at exit; a failed POST drops that batch.
+- The file is OTLP/JSON, one export object per line (the Collector file exporter format),
+  created user-only (0600). The endpoint gets OTLP/HTTP JSON at `/v1/traces`: https, or
+  http on loopback only; no credentials, query or fragment in the URL; redirects never
+  followed; `http_proxy` and friends ignored; headers from `OTEL_EXPORTER_OTLP_HEADERS`
+  (validated at start).
+- Export never blocks or breaks the proxy: spans queue (at most 10,000) and flush every
+  2 seconds and at exit; a POST has a 10-second total deadline; a failed export drops that
+  batch and prints one WARN. A server error is `verdict: error` even if it reuses a gate
+  code; `blocked` means the gate replaced the response.
 
 **Limits:** stdlib only, so no gRPC and no sampling; the client's own trace context is not
 joined (MCP has no standard header for it); a process killed hard loses the last 2 seconds

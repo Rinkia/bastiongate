@@ -94,10 +94,18 @@ class Gate:
         params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
         with self.otel.collect(session, msg.get("id")):
             forward, reply = self._handle_client_msg(msg, session)
+            # args the server gets (scrubbed) or, for a call the gate refused, the request's
             sent = (forward or msg).get("params") or {}
-            self.otel.call_started(session, msg.get("id"), params.get("name", ""),
-                                   sent.get("arguments") if isinstance(sent, dict) else None, reply)
+            self._otel_safe(self.otel.call_started, session, msg.get("id"), params.get("name", ""),
+                            sent.get("arguments") if isinstance(sent, dict) else None, reply)
         return forward, reply
+
+    def _otel_safe(self, fn, *args, **kwargs) -> None:
+        """Span bookkeeping must never break or delay forwarding."""
+        try:
+            fn(*args, **kwargs)
+        except Exception:  # noqa: BLE001
+            self._bump("otel_error")
 
     def _handle_client_msg(self, msg: dict, session=None) -> tuple[dict | None, dict | None]:
         if not jsonrpc.is_request(msg):
@@ -220,7 +228,7 @@ class Gate:
         if self.otel is not None:
             with self.otel.collect(session, msg.get("id")):
                 out = self._handle_response_safe(msg, session)
-                self.otel.call_ended(session, msg.get("id"), out, upstream=msg)
+                self._otel_safe(self.otel.call_ended, session, msg.get("id"), out, upstream=msg)
             return out
         return self._handle_response_safe(msg, session)
 
@@ -616,7 +624,7 @@ class Gate:
 
     def _remember(self, session, mid, method, tool, repo=None) -> None:
         now = time.monotonic()
-        key = (session, mid)
+        key = _pending_key(session, mid)
         with self._lock:
             if session not in self._order and len(self._order) >= MAX_SESSIONS:
                 # evict the least-recently-used other session wholesale
@@ -639,7 +647,7 @@ class Gate:
             dq.append(key)
 
     def _recall(self, session, mid) -> tuple[str | None, str | None, str | None]:
-        key = (session, mid)
+        key = _pending_key(session, mid)
         with self._lock:
             entry = self._pending.pop(key, None)
             dq = self._order.get(session)
@@ -651,6 +659,13 @@ class Gate:
             if entry is None:
                 return (None, None, None)
             return (entry[0], entry[1], entry[3])
+
+
+def _pending_key(session, mid):
+    """A hashable (session, id) whatever JSON the id is: a list or object id (invalid
+    JSON-RPC, but a client or server can send one) must not crash the proxy."""
+    ok = isinstance(mid, (int, str, float, type(None)))
+    return session, (mid if ok else json.dumps(mid, sort_keys=True, default=str))
 
 
 def _carries_content(msg: dict, *, messages: bool = True) -> bool:

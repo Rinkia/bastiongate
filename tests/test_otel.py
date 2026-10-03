@@ -52,7 +52,7 @@ def test_forwarded_call_span_shape(tmp_path):
     assert s["name"] == "execute_tool read_file" and s["kind"] == 3
     assert a["gen_ai.operation.name"] == "execute_tool" and a["gen_ai.tool.name"] == "read_file"
     assert a["gen_ai.tool.call.id"] == "1" and a["bastion.gate.verdict"] == "forwarded"
-    assert len(a["bastion.gate.args_sha256"]) == 64 and len(a["bastion.gate.result_sha256"]) == 64
+    assert len(a["bastion.gate.args_hmac"]) == 64 and len(a["bastion.gate.result_hmac"]) == 64
     assert "gen_ai.tool.call.arguments" not in a and "gen_ai.tool.call.result" not in a  # hashes only
     assert len(s["traceId"]) == 32 and len(s["spanId"]) == 16
     assert int(s["endTimeUnixNano"]) >= int(s["startTimeUnixNano"])
@@ -207,6 +207,121 @@ def test_queue_is_bounded(tmp_path, monkeypatch):
     sink.flush()  # one export object with the 3 queued spans
     lines = (tmp_path / "s.jsonl").read_text().splitlines()
     assert len(lines) == 1 and len(json.loads(lines[0])["resourceSpans"][0]["scopeSpans"][0]["spans"]) == 3
+
+
+# --- review round 1 regressions -------------------------------------------------------
+
+@pytest.mark.parametrize("mid", [[1], {"a": 1}, None, True, 1.5], ids=["list", "dict", "none", "bool", "float"])
+def test_odd_ids_never_break_the_proxy(tmp_path, mid):
+    g, sink = make(tmp_path)
+    fwd, reply = g.handle_client_msg({"jsonrpc": "2.0", "id": mid, "method": "tools/call",
+                                      "params": {"name": "t", "arguments": {}}})
+    out = g.handle_server_msg({"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": "ok"}]}})
+    assert out["result"]["content"][0]["text"] == "ok"
+
+
+def test_surrogate_tool_name_never_kills_export(tmp_path):
+    g, sink = make(tmp_path)
+    call(g, "a\ud800b", "ok")
+    sink.flush()
+    call(g, "after", "ok", mid=2)
+    sink.flush()
+    assert [attrs(s)["gen_ai.tool.name"] for s in spans(tmp_path)] == ["a\ud800b", "after"]
+
+
+def test_secret_keys_and_blocked_args_never_exported_or_guessable(tmp_path):
+    g, sink = make(tmp_path, content=True)
+    call(g, "login", "ok", args={"password": "hunter2", "token": "abc123secret", "pin": "1234", "user": "bob"})
+    sink.flush()
+    a = attrs(spans(tmp_path)[0])
+    for secret in ("hunter2", "abc123secret", "1234"):
+        assert secret not in a["gen_ai.tool.call.arguments"]
+    assert "bob" in a["gen_ai.tool.call.arguments"]
+    import hashlib
+
+    plain = hashlib.sha256(json.dumps({"pin": "1234"}).encode()).hexdigest()
+    assert a["bastion.gate.args_hmac"] != plain  # keyed: not a dictionary-attackable sha256
+
+
+def test_server_error_with_gate_code_is_not_called_blocked(tmp_path):
+    g, sink = make(tmp_path)
+    g.handle_client_msg({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "t", "arguments": {}}})
+    g.handle_server_msg({"jsonrpc": "2.0", "id": 1, "error": {"code": -32002, "message": "upstream says no"}})
+    sink.flush()
+    a = attrs(spans(tmp_path)[0])
+    assert a["bastion.gate.verdict"] == "error"
+
+
+def test_structured_content_digested_and_exported(tmp_path):
+    g, sink = make(tmp_path, content=True)
+    g.handle_client_msg({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "t", "arguments": {}}})
+    g.handle_server_msg({"jsonrpc": "2.0", "id": 1, "result": {"content": [], "structuredContent": {"temp": 21}}})
+    sink.flush()
+    assert '"temp": 21' in attrs(spans(tmp_path)[0])["gen_ai.tool.call.result"]
+
+
+@pytest.mark.parametrize("url", ["http://user:pw@localhost:4318", "http://localhost:4318?x=1", "https://h#f"],
+                         ids=["userinfo", "query", "fragment"])
+def test_endpoint_rejects_credentials_query_fragment(url):
+    with pytest.raises(ValueError) as e:
+        otel.OtelSink(endpoint=url)
+    assert "pw" not in str(e.value)
+
+
+@pytest.mark.parametrize("hdr", ["a=b%0d%0aX-Evil:1", "bad name=1", "x=a%00b"], ids=["crlf", "name", "nul"])
+def test_bad_otlp_headers_rejected_at_start(monkeypatch, hdr):
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", hdr)
+    with pytest.raises(ValueError):
+        otel.OtelSink(endpoint="http://127.0.0.1:4318")
+
+
+def test_env_proxy_is_ignored(monkeypatch):
+    monkeypatch.setenv("http_proxy", "http://proxy.example:3128")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+    # an empty ProxyHandler replaces the environment one (and registers no proxy_open)
+    assert not any(getattr(h, "proxies", None) for h in otel._OPENER.handlers)
+    assert not any(hasattr(h, "http_open") and type(h).__name__ == "ProxyHandler" for h in otel._OPENER.handlers)
+
+
+def test_slow_collector_has_a_total_deadline(monkeypatch):
+    import socket
+
+    monkeypatch.setattr(otel, "HTTP_DEADLINE", 0.5)
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)  # accepts, never answers
+    try:
+        sink = otel.OtelSink(endpoint=f"http://127.0.0.1:{srv.getsockname()[1]}", flush_every=None,
+                             warn=lambda _l: None)
+        g = Gate(GatePolicy(), otel=sink)
+        call(g, "t", "ok")
+        import time as _t
+
+        start = _t.perf_counter()
+        sink.flush()
+        assert _t.perf_counter() - start < 2.0 and sink.dropped == 1
+    finally:
+        srv.close()
+
+
+def test_export_failure_warned_once(tmp_path):
+    warns = []
+    sink = otel.OtelSink(endpoint="http://127.0.0.1:9", flush_every=None, warn=warns.append)
+    g = Gate(GatePolicy(), otel=sink)
+    for i in range(3):
+        call(g, "t", "ok", mid=i + 1)
+        sink.flush()
+    assert len(warns) == 1 and "dropped" in warns[0]
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX permissions")
+def test_span_file_is_user_only(tmp_path):
+    import os
+
+    g, sink = make(tmp_path)
+    call(g, "t", "ok")
+    sink.flush()
+    assert (os.stat(tmp_path / "spans.jsonl").st_mode & 0o077) == 0
 
 
 def test_pending_calls_bounded(tmp_path, monkeypatch):
