@@ -300,6 +300,11 @@ def run_http(upstream: str, policy: GatePolicy, host: str = "127.0.0.1",
              port: int = 9000, log_path: str | None = None,
              auth_key: str | None = None) -> int:
     """Serve the gate in front of `upstream` until interrupted."""
+    if policy.taint_group:
+        from .policy import PolicyError
+
+        raise PolicyError("taint_group works with `bastiongate run` (stdio) only: an HTTP gate serves "
+                          "many clients and must not pool their taint into one group")
     scheme = urllib.parse.urlparse(upstream).scheme
     if scheme not in ("http", "https"):
         raise ValueError(f"upstream must be http/https, got {scheme!r}")

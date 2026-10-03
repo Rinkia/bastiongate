@@ -52,6 +52,9 @@ class GatePolicy:
     on_encoded_result: str = WARN  # warn (shadow, default) | block (-32006)
     decode_transforms: bool = False  # also rot13/leet/reversed/spaced views (opt-in, results <= 64 KB)
     label_packs: bool = True  # built-in labels for common servers (github, fetch, ...)
+    # share flow-guard taint with the other gates of this group (stdio only; 0.12):
+    # a name, or `auto` = the parent process id. None = per-process taint (default)
+    taint_group: str | None = None
 
     # per-tool knob overrides: {tool_name: {knob: value}}; `labels` sets flow labels
     tools: dict = field(default_factory=dict)
@@ -135,7 +138,7 @@ _CHOICE_KNOBS = {
 }
 _FLOW_KNOBS = ("scan_flows", "on_tainted_egress", "label_packs", "on_encoded_result", "scan_resources",
                "decode_transforms", "scan_prompts")
-_GATE_KNOBS = frozenset(_BOOL_KNOBS) | frozenset(_CHOICE_KNOBS) | {"tools"}
+_GATE_KNOBS = frozenset(_BOOL_KNOBS) | frozenset(_CHOICE_KNOBS) | {"tools", "taint_group"}
 _MODES = ("off", "shadow", "enforce")
 _INSPECTOR_NAMESPACES = ("bastion.", "custom.")  # run by agentbastion deep-inspect
 _IGNORED_NAMESPACES = ("supply.", "skill.")  # tools gate never runs
@@ -181,7 +184,17 @@ def _from_v2(obj: dict) -> GatePolicy:
     )
 
 
+def _check_taint_group(value, where: str) -> None:
+    from .taint_store import GROUP_RE
+
+    if value is not None and not (isinstance(value, str) and GROUP_RE.fullmatch(value)):
+        raise PolicyError(f"`{where}.taint_group` must be `auto` or a name of 1-64 letters, digits "
+                          f"or _.:- characters, got {value!r}")
+
+
 def _check_knob(knob: str, value, where: str) -> None:
+    if knob == "taint_group":
+        _check_taint_group(value, where)
     if knob in _BOOL_KNOBS and not isinstance(value, bool):
         raise PolicyError(f"`{where}.{knob}` must be true or false, got {value!r}")
     if knob in _CHOICE_KNOBS and value not in _CHOICE_KNOBS[knob]:
@@ -274,6 +287,8 @@ def _from_v1(obj: dict) -> GatePolicy:
     for knob in _FLOW_KNOBS:
         if knob in obj:
             _check_knob(knob, obj[knob], "policy")
+    if "taint_group" in obj:
+        _check_taint_group(obj["taint_group"], "policy")
     tools = obj.get("tools", {}) or {}
     if isinstance(tools, dict):
         for tool, override in tools.items():
@@ -309,5 +324,6 @@ def _from_v1(obj: dict) -> GatePolicy:
         on_encoded_result=obj.get("on_encoded_result", WARN),
         decode_transforms=obj.get("decode_transforms", False),
         label_packs=obj.get("label_packs", True),
+        taint_group=obj.get("taint_group"),
         tools=tools,
     )
