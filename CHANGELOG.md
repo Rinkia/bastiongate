@@ -10,9 +10,15 @@
   - `resources/list`, `resources/templates/list`, `prompts/list`: poisoned, oversize or
     malformed entries are dropped under `on_poisoned_tool: block`.
   - Uncorrelated responses of these shapes are routed to the same checks.
-- Evidence: on 1,015 real skill and agent files, the prompt checks flagged 0 prompts (3 hits,
-  all byte-order marks or zero-width spaces in non-prompt files); the full signature set
-  would have flagged 98.
+- Evidence: on 1,015 real skill and agent files, the prompt checks flagged no prompt (one hit:
+  stray byte-order marks and a zero-width space in a CHANGELOG); the full signature set would
+  have flagged 98.
+- Security review (2026-10-03) fixes before release: an extra empty `messages`/listing key can
+  no longer downgrade a tool result to the prompt checks; prompt descriptions without
+  messages, prompt argument titles and variation-selector steganography are covered; known
+  payloads match through look-alike letters, markdown emphasis and a dropped final period;
+  ZWJ/ZWNJ in Indic and Arabic-script text no longer false-positive; prompts over 1M
+  characters fail closed under block.
 
 ## 0.10.0 (unreleased)
 

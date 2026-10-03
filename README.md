@@ -281,10 +281,15 @@ responses through entirely (no scan, scrub or taint), as in 0.9.
 Since 0.11 the gate also checks the other server text a client can hand the model:
 - **`prompts/get`**: a prompt template is instructions by design ("always review...", "you
   must..."), so the full injection signatures would flag ordinary templates (98 of 1,015 real
-  skill and agent files did). Only high-precision checks run: hidden or control unicode (an
-  emoji joiner and a leading byte-order mark are allowed), a known bastioncorpus payload, or
-  one hidden in an encoding. A hit is handled by `on_injected_result` (block: -32002, warn:
-  forwarded and the session tainted), under the pseudo tool name `prompts/get`.
+  skill and agent files did). Only high-precision checks run: hidden or control unicode
+  (allowed: an emoji joiner, a leading byte-order mark, ZWJ/ZWNJ between letters of scripts
+  such as Devanagari or Persian), variation-selector steganography, a known bastioncorpus
+  payload (matched after folding case, look-alike letters, markdown emphasis and trailing
+  punctuation), or one hidden in an encoding. A hit is handled by `on_injected_result`
+  (block: -32002, warn: forwarded and the session tainted), under the pseudo tool name
+  `prompts/get`. A prompt over 1,000,000 characters is refused under block. A prompt result
+  that also carries tool-result content (`content`, `contents`, `structuredContent`) or an
+  error gets the full result checks instead.
 - **`resources/list`, `resources/templates/list`, `prompts/list`**: each entry's name, title,
   description, uri and prompt-argument descriptions get the same checks as a tool definition.
   A poisoned, oversize or malformed entry is dropped under `on_poisoned_tool: block`
@@ -297,9 +302,10 @@ tools:
 ```
 
 **Limits:** a prompt template carrying a new, never-seen injection phrase in plain text is not
-flagged: that is the price of zero false positives on real templates (0 of 1,015 skill and
-agent files flagged; the 3 hits were stray byte-order marks and zero-width spaces in
-non-prompt files).
+flagged, and a known phrase with words inserted or reordered is missed: that is the price of
+no false positives on real templates (0 of 1,015 skill and agent files flagged as prompts; the
+one hit was stray byte-order marks and a zero-width space inside a CHANGELOG). With
+`scan_resources: false`, resources embedded in prompts are not read.
 
 ### Argument PII/secret scrub
 

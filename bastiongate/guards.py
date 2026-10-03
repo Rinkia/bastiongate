@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import unicodedata
@@ -169,10 +170,50 @@ _ASCII_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # legitimate invisible characters in prompt text: a joiner inside an emoji sequence
 # ("man" ZWJ "laptop") and a byte-order mark at the very start
 _EMOJI_ZWJ = re.compile("(?<=[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F])\u200D(?=[\U0001F000-\U0001FAFF\u2600-\u27BF])")
+_JOINERS = re.compile("[\u200C\u200D]")
+# variation selectors carry no text of their own: a run of them (or any from the
+# supplement) after one character is a known steganography channel
+_VS_STEGO = re.compile("[\U000E0100-\U000E01EF]|[\uFE00-\uFE0F]{2,}")
+_MARKUP = re.compile(r"[*_`~|>#]+")
+PROMPT_SCAN_MAX_CHARS = 1_000_000  # bigger prompts are not scanned: they fail closed under block
+
+
+def _script_letter(c: str) -> bool:
+    """A letter or combining mark outside ASCII: ZWJ/ZWNJ between two of these is
+    ordinary Indic/Arabic/Persian orthography, not hidden text."""
+    return not c.isascii() and unicodedata.category(c)[0] in "LM"
+
+
+def _drop_script_joiners(text: str) -> str:
+    def keep(m):
+        i = m.start()
+        ok = 0 < i < len(text) - 1 and _script_letter(text[i - 1]) and _script_letter(text[i + 1])
+        return "" if ok else m.group(0)
+    return _JOINERS.sub(keep, text)
+
+
+@functools.lru_cache(maxsize=1)
+def _confusables():
+    try:
+        from bastionsupply.checks import _HOMOGLYPHS
+        return str.maketrans(dict(_HOMOGLYPHS))
+    except Exception:  # noqa: BLE001 - optional: an older bastionsupply has no table
+        return {}
 
 
 def _fold(text: str) -> str:
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text)).lower().strip()
+    """NFKC, lowercase, look-alike letters to Latin, markdown emphasis removed,
+    whitespace collapsed: `**Ignоre** all previous` matches `ignore all previous`."""
+    text = unicodedata.normalize("NFKC", text).lower().translate(_confusables())
+    return re.sub(r"\s+", " ", _MARKUP.sub("", text)).strip()
+
+
+@functools.lru_cache(maxsize=1)
+def _folded_signatures() -> tuple[str, ...]:
+    from bastionsupply.corpus import poison_signatures
+
+    # folded like the text, trailing punctuation dropped so a missing "." still matches
+    return tuple(dict.fromkeys(_fold(p).rstrip(".!?;:, ") for _cat, p in poison_signatures()))
 
 
 def scan_instruction_text(text: str, views=None) -> Decision:
@@ -184,19 +225,20 @@ def scan_instruction_text(text: str, views=None) -> Decision:
     if not text:
         return Decision(True, "empty")
     from bastionsupply.checks import check_hidden_unicode, decoded_views
-    from bastionsupply.corpus import poison_signatures
 
-    visible = _EMOJI_ZWJ.sub("", text.removeprefix("\ufeff"))
+    if _VS_STEGO.search(text):
+        return Decision(False, "prompt carries hidden text in variation selectors")
+    visible = _drop_script_joiners(_EMOJI_ZWJ.sub("", text.removeprefix("\ufeff")))
     if (not visible.isascii() or _ASCII_CONTROL.search(visible)) and \
             check_hidden_unicode(Server("prompt", (Tool(name="_", description=visible),))):
         return Decision(False, "prompt carries hidden/control unicode")
-    sigs = poison_signatures()
+    sigs = _folded_signatures()
     low = _fold(text)
-    if any(phrase in low for _cat, phrase in sigs):
+    if any(phrase in low for phrase in sigs):
         return Decision(False, "prompt carries a known prompt-injection payload (bastioncorpus)")
     for d in (decoded_views(text) if views is None else views):
         low = _fold(d.text)
-        if any(phrase in low for _cat, phrase in sigs):
+        if any(phrase in low for phrase in sigs):
             return Decision(False, f"prompt carries a known prompt-injection payload hidden in {d.encoding} encoding")
     return Decision(True, "clean prompt")
 
@@ -207,7 +249,7 @@ def listing_entry_text(item: dict) -> str:
     parts = [item.get(k) for k in ("name", "title", "description", "uri", "uriTemplate")]
     for arg in item.get("arguments") or [] if isinstance(item.get("arguments"), list) else []:
         if isinstance(arg, dict):
-            parts += [arg.get("name"), arg.get("description")]
+            parts += [arg.get("name"), arg.get("title"), arg.get("description")]
     return "\n".join(p for p in parts if isinstance(p, str))
 
 

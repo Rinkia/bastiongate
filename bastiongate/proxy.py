@@ -216,21 +216,31 @@ class Gate:
             elif listing:
                 method = listing
             elif isinstance(result.get("messages"), list):
-                method = PROMPTS_GET  # a template: instruction checks, not the full set
-            elif _carries_content(msg):
-                method, tool = "tools/call", UNMATCHED
+                method = PROMPTS_GET
+            if method is None or _carries_content(msg):
                 self.trace.emit("response_unmatched", id=msg.get("id"))
                 self._bump("response_unmatched")
+            if method is None and _carries_content(msg):
+                method, tool = "tools/call", UNMATCHED
+
+        if method in LISTINGS:
+            msg = self._filter_listing(msg, method)
+            if not _carries_content(msg):
+                return msg
+            # a listing that ALSO carries tool-result content gets the full result checks
+            method, tool = "tools/call", tool or method
+        elif method == PROMPTS_GET:
+            if not _carries_content(msg):
+                return self._check_prompt(msg, session)
+            # content/contents/structuredContent or an error is data, not a template:
+            # the full result checks (one extra key must never downgrade the scan)
+            method, tool = "tools/call", PROMPTS_GET
 
         if method == "initialize":
             return self._check_instructions(msg)
         if method == "tools/list":
             self._learn_labels(msg)
             return self._filter_tools(msg) if self.policy.scan_tools else msg
-        if method in LISTINGS:
-            return self._filter_listing(msg, method)
-        if method == PROMPTS_GET:
-            return self._check_prompt(msg, session)
         if method in ("tools/call", RESOURCES_READ):
             if method == RESOURCES_READ and not self.policy.opt(tool, "scan_resources"):
                 return msg  # kill switch: resources/read passes as in 0.9
@@ -281,7 +291,16 @@ class Gate:
         tool = PROMPTS_GET
         if not (self.policy.scan_prompts and self.policy.opt(tool, "scan_prompts")):
             return msg
-        decision = guards.scan_instruction_text(self._text_for_scan(msg, tool))
+        text = self._text_for_scan(msg, tool)
+        if len(text) > guards.PROMPT_SCAN_MAX_CHARS:
+            self.trace.emit("prompt_scan_skipped", id=msg.get("id"), chars=len(text))
+            self._bump("prompt_scan_skipped")
+            if self.policy.opt(tool, "on_injected_result") == BLOCK:
+                return jsonrpc.error_response(msg.get("id"), BLOCK_RESULT_CODE,
+                                              f"bastiongate blocked prompt: {len(text)} characters is too large "
+                                              f"to check (limit {guards.PROMPT_SCAN_MAX_CHARS})")
+            return msg
+        decision = guards.scan_instruction_text(text)
         if decision.allowed:
             return msg
         self.trace.emit("prompt_blocked", id=msg.get("id"), reason=decision.reason)
