@@ -381,8 +381,9 @@ bastiontrace analyze --otel spans.jsonl --forbid send_email     # forensics on t
   `bastion.gate.code`, `bastion.gate.checks` (the gate's trace events for the call),
   `bastion.gate.tainted_egress`.
 - Content: by default only `bastion.gate.args_hmac` / `result_hmac` (HMAC-SHA256 with a
-  per-process key: they correlate calls within one gate run but cannot be used to guess a
-  short secret). With `--otel-content`, `gen_ai.tool.call.arguments` / `.result` (what the
+  per-process key: they correlate calls within one gate run, never across runs, and cannot
+  be used to guess a short secret; arguments that differ only in redacted fields digest the
+  same). With `--otel-content`, `gen_ai.tool.call.arguments` / `.result` (what the
   agent got, `structuredContent` included) are added with secret-named fields (`password`,
   `token`, `api_key`, `pin`...) and PII redacted, capped at 16 KB each; a blocked call also
   carries the server's text as `bastion.gate.upstream_result` (evidence, kept out of the

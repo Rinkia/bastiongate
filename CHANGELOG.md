@@ -17,7 +17,10 @@
   argument fields are redacted in content; the endpoint refuses credentials, query and
   fragment, ignores proxy env vars and has a total POST deadline; bad OTLP headers fail at
   start; export failures print one WARN; the spans file is 0600; a server error is never
-  labelled as a gate block.
+  labelled as a gate block. Second round: one collector POST in flight at most (no thread
+  pile-up under a slow collector); arguments over 1M characters are digested, not scrubbed
+  or exported; more secret-named keys; type-tagged id keys; a reused id drops the open span
+  instead of misattributing it.
 - Evidence: live smoke, official MCP SDK 2.2.0 client through `bastiongate run --otel-out
   --otel-content` (a page tool returning an injection under warn, then `send_email`):
   `bastiontrace analyze --otel` on the gate's file reports LANDED (inject in `fetch_page`,

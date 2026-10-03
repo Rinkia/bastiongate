@@ -243,6 +243,64 @@ def test_secret_keys_and_blocked_args_never_exported_or_guessable(tmp_path):
     assert a["bastion.gate.args_hmac"] != plain  # keyed: not a dictionary-attackable sha256
 
 
+@pytest.mark.parametrize("key,secret", [("db_password", True), ("githubToken", True), ("x-api-key", True),
+                                        ("pin", True), ("session_id", True), ("mapping", False),
+                                        ("author", False), ("pinned", False), ("tokens_used", False)])
+def test_secret_key_matching(key, secret):
+    assert otel._secret_key(key) is secret
+
+
+@pytest.mark.parametrize("key", ["secret_key", "signingKey", "encryption_key", "jwt", "connection_string",
+                                 "dsn", "credentials_json", "cookies"])
+def test_more_secret_keys(key):
+    assert otel._secret_key(key)
+
+
+def test_keys_are_type_tagged():
+    keys = {otel._key(None, m) for m in (1, 1.0, "1", [1], "[1]", "1.0")}
+    assert len(keys) == 6
+
+
+def test_huge_args_digest_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(otel, "MAX_SCRUB_CHARS", 1000)
+    g, sink = make(tmp_path, content=True)
+    call(g, "t", "ok", args={"blob": "x" * 5000})
+    sink.flush()
+    a = attrs(spans(tmp_path)[0])
+    assert a["gen_ai.tool.call.arguments"].startswith("[arguments not exported")
+    assert len(a["bastion.gate.args_hmac"]) == 64
+
+
+def test_reused_id_never_misattributes(tmp_path):
+    g, sink = make(tmp_path)
+    g.handle_client_msg({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "t", "arguments": {}}})
+    g.handle_client_msg({"jsonrpc": "2.0", "id": 11, "method": "tools/list"})  # client reuses the id
+    g.handle_server_msg({"jsonrpc": "2.0", "id": 11, "result": {"tools": []}})
+    sink.flush()
+    assert not (tmp_path / "spans.jsonl").exists() and sink.dropped == 1
+
+
+def test_one_post_in_flight(monkeypatch):
+    import socket
+    import threading as th
+
+    monkeypatch.setattr(otel, "HTTP_DEADLINE", 0.3)
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)  # accepts, never answers: every POST hangs until its socket timeout
+    try:
+        sink = otel.OtelSink(endpoint=f"http://127.0.0.1:{srv.getsockname()[1]}", flush_every=None,
+                             warn=lambda _l: None)
+        g = Gate(GatePolicy(), otel=sink)
+        before = th.active_count()
+        for i in range(6):
+            call(g, "t", "ok", mid=i + 1)
+            sink.flush()
+        assert th.active_count() - before <= 1
+    finally:
+        srv.close()
+
+
 def test_server_error_with_gate_code_is_not_called_blocked(tmp_path):
     g, sink = make(tmp_path)
     g.handle_client_msg({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "t", "arguments": {}}})

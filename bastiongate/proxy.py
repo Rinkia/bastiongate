@@ -89,7 +89,10 @@ class Gate:
         `session` scopes request/response correlation so one Gate serving many
         HTTP sessions cannot cross-correlate on a reused JSON-RPC id.
         """
-        if self.otel is None or not jsonrpc.is_request(msg) or jsonrpc.method_of(msg) != "tools/call":
+        if self.otel is None or not jsonrpc.is_request(msg):
+            return self._handle_client_msg(msg, session)
+        if jsonrpc.method_of(msg) != "tools/call":
+            self._otel_safe(self.otel.forget, session, msg.get("id"))  # id reuse: never misattribute
             return self._handle_client_msg(msg, session)
         params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
         with self.otel.collect(session, msg.get("id")):
@@ -664,8 +667,8 @@ class Gate:
 def _pending_key(session, mid):
     """A hashable (session, id) whatever JSON the id is: a list or object id (invalid
     JSON-RPC, but a client or server can send one) must not crash the proxy."""
-    ok = isinstance(mid, (int, str, float, type(None)))
-    return session, (mid if ok else json.dumps(mid, sort_keys=True, default=str))
+    ok = isinstance(mid, (int, str, type(None))) and not isinstance(mid, bool)
+    return session, (mid if ok else (type(mid).__name__, json.dumps(mid, sort_keys=True, default=str)))
 
 
 def _carries_content(msg: dict, *, messages: bool = True) -> bool:

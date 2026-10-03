@@ -48,12 +48,23 @@ MAX_PENDING = 10_000  # calls started, response not seen yet
 MAX_TRACES = 10_000  # sessions with a trace id
 MAX_CONTENT_CHARS = 16_384
 MAX_NAME_CHARS = 256
+MAX_SCRUB_CHARS = 1_000_000  # bigger arguments: digest only, no content (bounded work on the pump)
 TRUNCATED = "...[truncated by bastiongate]"
 HTTP_DEADLINE = 10.0  # whole POST, connect to last byte
 INFO_EVENTS = frozenset({"tool_call", "response_unmatched", "taint_group"})  # not a warning
-# argument keys whose values are secrets whatever they look like
-SECRET_KEY = re.compile(r"pass(word|wd|code)?|secret|token|api[_-]?key|auth|bearer|cookie|session|pin|otp|"
-                        r"credential|private[_-]?key", re.I)
+# argument keys whose values are secrets whatever they look like: the key with
+# separators removed ends with one of these ("db_password", "githubToken", "x-api-key")
+_SECRET_SUFFIXES = ("password", "passwd", "passphrase", "passcode", "secret", "token", "apikey",
+                    "privatekey", "accesskey", "secretkey", "signingkey", "encryptionkey", "credential",
+                    "credentials", "cookie", "cookies", "authorization", "bearer", "sessionid", "otp", "jwt",
+                    "connectionstring", "dsn")
+_SECRET_PREFIXES = ("credential", "secret", "password")
+_SECRET_EXACT = frozenset({"pin", "pwd", "pass", "auth", "session", "key", "cvv", "ssn"})
+
+
+def _secret_key(key: str) -> bool:
+    k = re.sub(r"[^a-z0-9]", "", key.lower())
+    return k in _SECRET_EXACT or k.endswith(_SECRET_SUFFIXES) or k.startswith(_SECRET_PREFIXES)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -119,7 +130,7 @@ def _redact_keys(obj, depth: int = 0):
     if depth > 32:
         return "[REDACTED:depth]"
     if isinstance(obj, dict):
-        return {k: ("[REDACTED:key]" if isinstance(k, str) and SECRET_KEY.search(k)
+        return {k: ("[REDACTED:key]" if isinstance(k, str) and _secret_key(k)
                     else _redact_keys(v, depth + 1)) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_redact_keys(v, depth + 1) for v in obj]
@@ -132,9 +143,9 @@ def _clean(text: str) -> str:
 
 
 def _key(session, mid):
-    """A hashable pending key whatever JSON type the id has (a list id must not crash)."""
-    ok = isinstance(mid, (int, str)) and not isinstance(mid, bool)
-    return session, (mid if ok else json.dumps(mid, sort_keys=True, default=str))
+    """A hashable pending key whatever JSON type the id has (a list id must not crash);
+    type-tagged so 1, 1.0, "1" and [1] never share a key."""
+    return session, (type(mid).__name__, json.dumps(mid, sort_keys=True, default=str))
 
 
 class OtelSink:
@@ -155,6 +166,7 @@ class OtelSink:
         self._lock = threading.Lock()
         self._io_lock = threading.Lock()
         self._local = threading.local()  # the call whose trace events are being collected
+        self._poster: threading.Thread | None = None  # at most one POST in flight
         if flush_every:
             threading.Thread(target=self._loop, args=(flush_every,), name="bastiongate-otel",
                              daemon=True).start()
@@ -196,10 +208,23 @@ class OtelSink:
         return tid
 
     def _args(self, args) -> tuple[str, str | None]:
-        """(digest, exportable text or None): secret keys and PII removed before either."""
-        cleaned = pii.scrub(_redact_keys(args))[0] if args is not None else None
-        text = json.dumps(cleaned, sort_keys=True, default=str) if cleaned is not None else ""
+        """(digest, exportable text or None): secret keys and PII removed before either.
+        Arguments over MAX_SCRUB_CHARS are digested raw (the digest is keyed) and not
+        exported, so a huge call costs one dump, never a full scrub on the pump thread."""
+        if args is None:
+            return self._digest(""), ("" if self.content else None)
+        raw = json.dumps(args, sort_keys=True, default=str)
+        if len(raw) > MAX_SCRUB_CHARS:
+            return self._digest(raw), (f"[arguments not exported: {len(raw)} characters]" if self.content else None)
+        text = json.dumps(pii.scrub(_redact_keys(args))[0], sort_keys=True, default=str)
         return self._digest(text), (_cap(text) if self.content else None)
+
+    def forget(self, session, mid) -> None:
+        """The client reused a pending tools/call id for another request: that span can
+        no longer be matched to its response, so it is dropped, never misattributed."""
+        with self._lock:
+            if self._pending.pop(_key(session, mid), None) is not None:
+                self.dropped += 1
 
     def call_started(self, session, mid, tool: str, args, reply: dict | None) -> None:
         """A tools/call request: open its span, or close it at once if the gate replied."""
@@ -305,7 +330,10 @@ class OtelSink:
 
     def _post(self, body: str) -> str | None:
         """POST with a total deadline (a drip-feeding collector cannot hang a flush or
-        the exit). Returns an error description or None."""
+        the exit) and at most one in flight: while a slow POST is still running, new
+        batches are dropped instead of piling up threads. Returns an error or None."""
+        if self._poster is not None and self._poster.is_alive():
+            return "previous export still in flight"
         outcome: list = []
 
         def run() -> None:
@@ -319,6 +347,7 @@ class OtelSink:
                 outcome.append(type(e).__name__)
 
         worker = threading.Thread(target=run, name="bastiongate-otel-post", daemon=True)
+        self._poster = worker
         worker.start()
         worker.join(HTTP_DEADLINE)
         return outcome[0] if outcome else "deadline exceeded"
