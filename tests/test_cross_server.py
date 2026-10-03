@@ -148,19 +148,80 @@ def test_idle_expiry(monkeypatch):
     t = [1_000_000.0]
     monkeypatch.setattr(taint_store.time, "time", lambda: t[0])
     call(b, "read_file", "secret")
-    t[0] += taint_store.TAINT_IDLE_SECONDS + 1
+    t[0] += taint_store.STALE_SECONDS + 1  # b never re-stamped its row
     call(a, "fetch", "page")
     egress(a)
     assert not any(e == "tainted_egress" for e, _ in trace_a.rows)
 
 
-def test_row_cap(monkeypatch):
-    monkeypatch.setattr(taint_store, "MAX_ROWS_PER_GROUP", 5)
-    store = taint_store.SharedTaint("g", "s")
+def test_row_cap_is_per_writer(monkeypatch):
+    monkeypatch.setattr(taint_store, "MAX_ROWS_PER_WRITER", 5)
+    victim = taint_store.SharedTaint("g", "fetch")
+    victim.add("U", "fetch", None)
+    flood = taint_store.SharedTaint("g", "evil")
     for i in range(20):
-        store.add("P", f"t{i}", None)
-    assert len(store.rows()) == 5
-    assert [r.source for r in store.rows()][-1] == "s:t19"
+        flood.add("P", f"t{i}", None)
+    rows = victim.rows()
+    assert ("U", "fetch:fetch") in [(r.kind, r.source) for r in rows]  # never evicted by another writer
+    assert len([r for r in rows if r.writer == flood.writer]) == 5
+
+
+def test_distinct_repos_collapse_to_one_row():
+    store = taint_store.SharedTaint("g", "gh")
+    for i in range(50):
+        store.add("P", "get_file_contents", f"o/r{i}")
+    rows = store.rows()
+    assert len(rows) == 1 and rows[0].repo is None  # several repos: never exempt
+    store.add("P", "get_file_contents", "o/r0")
+    assert store.rows()[0].repo is None
+
+
+def test_failed_write_is_retried(monkeypatch):
+    a, trace_a, _ = gate("fetch-server")
+    b, _, _ = gate("fs-server")
+    real = taint_store.SharedTaint.add
+    calls = []
+
+    def flaky(self, *args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise taint_store.StoreBusy("database is locked")
+        return real(self, *args)
+
+    monkeypatch.setattr(taint_store.SharedTaint, "add", flaky)
+    call(b, "read_file", "secret")  # first write fails (busy)
+    call(b, "read_file", "secret", mid=2)  # retried
+    call(a, "fetch", "page")
+    egress(a)
+    assert any(e == "tainted_egress" for e, _ in trace_a.rows)
+
+
+def test_busy_lock_never_disables_the_store(monkeypatch):
+    a, _, warns = gate("fetch-server")
+    monkeypatch.setattr(taint_store.SharedTaint, "add",
+                        lambda *_: (_ for _ in ()).throw(taint_store.StoreBusy("database is locked")))
+    for i in range(10):
+        call(a, "fetch", "page", mid=i + 1)
+    assert a.flows.shared is not None and not warns
+    assert a.metrics_snapshot()["taint_store_busy"] >= 1
+
+
+def test_heartbeat_keeps_live_rows_and_stale_rows_drop(monkeypatch):
+    a, trace_a, _ = gate("fetch-server")
+    b, _, _ = gate("fs-server")
+    t = [1_000_000.0]
+    monkeypatch.setattr(taint_store.time, "time", lambda: t[0])
+    call(b, "read_file", "secret")
+    for _ in range(5):  # 5 minutes of b alive and tainted: it keeps re-stamping
+        t[0] += taint_store.HEARTBEAT_SECONDS
+        b.flows.heartbeat()
+    call(a, "fetch", "page")
+    egress(a)
+    assert any(e == "tainted_egress" for e, _ in trace_a.rows)
+    t[0] += taint_store.STALE_SECONDS + 1  # b died: no heartbeat
+    trace_a.rows.clear()
+    egress(a, mid=10)
+    assert not any(e == "tainted_egress" for e, _ in trace_a.rows)
 
 
 # --- failure isolation ------------------------------------------------------------
@@ -197,9 +258,15 @@ def test_store_file_is_user_only(state_dir):
 
 def test_auto_group_skips_launchers(monkeypatch):
     if os.name == "nt":
-        procs = {os.getppid(): (500, "python.exe"), 500: (400, "uvx.exe"), 400: (1, "claude.exe")}
+        me = os.getpid()
+        procs = {me: (os.getppid(), "python.exe"), os.getppid(): (500, "python.exe"),
+                 500: (400, "uvx.exe"), 400: (1, "claude.exe")}
         monkeypatch.setattr(taint_store, "_windows_processes", lambda: procs)
         assert taint_store.resolve_group("auto") == "client:400"
+        # a Python MCP client above a venv redirector is the client, not a launcher
+        procs = {me: (os.getppid(), "python.exe"), os.getppid(): (700, "python.exe"),
+                 700: (600, "python.exe"), 600: (1, "bash.exe")}
+        assert taint_store.resolve_group("auto") == "client:700"
         monkeypatch.setattr(taint_store, "_windows_processes", lambda: (_ for _ in ()).throw(OSError("x")))
         assert taint_store.resolve_group("auto") == f"client:{os.getppid()}"
     else:
@@ -221,6 +288,11 @@ def test_env_group_used_when_policy_unset(monkeypatch):
     monkeypatch.setenv("BASTIONGATE_TAINT_GROUP", "envgroup")
     assert taint_store.resolve_group(None) == "envgroup"
     assert taint_store.resolve_group("pol") == "pol"  # the policy wins
+    monkeypatch.setenv("BASTIONGATE_TAINT_GROUP", "bad group!")
+    with pytest.raises(ValueError):
+        taint_store.resolve_group(None)
+    g = Gate(GatePolicy(), Rec(), warn=lambda _l: None)
+    assert g.flows.shared is None and g.metrics_snapshot()["taint_store_error"] == 1
 
 
 @pytest.mark.parametrize("bad", ["", "x" * 65, "has space", 5, True, ["a"]], ids=["empty", "long", "space", "int", "bool", "list"])

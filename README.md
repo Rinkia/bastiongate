@@ -196,13 +196,22 @@ taint_group: auto     # the MCP client that spawned this gate; or a name, e.g. m
   user-only on POSIX. Each row says `server:tool`, so warnings read
   `private from filesystem:read_file`; the trace event has `cross_server: true`.
 - `auto` groups the gates one client spawned: on POSIX by process group, on Windows by the
-  nearest ancestor process that is not a launcher (a venv `python.exe`, `py`, `uv`, `uvx`,
-  `cmd`). With an unusual launcher chain, set the same name on every server instead (or
-  env `BASTIONGATE_TAINT_GROUP`).
-- `initialize` clears only this gate's own rows; rows expire after 30 minutes idle; at
-  most 512 rows per group.
-- A store problem (locked, corrupt, unwritable) never breaks the proxy: the check uses
-  this gate's own taint, prints one WARN and counts `taint_store_error`.
+  nearest ancestor process that is not a launcher (`py`, `uv`, `uvx`, `cmd`, a console-script
+  shim, or the venv `python.exe` redirector right above the gate). The resolved group is in
+  the trace (`taint_group` event). `auto` can merge two clients started from one shell job
+  (POSIX) or miss a client that detaches its servers; a name set on every server entry is
+  the reliable path (or env `BASTIONGATE_TAINT_GROUP`).
+- Each gate keeps one row per tainting source (`server:tool`, at most 64 per gate), so one
+  gate can never flood out the others' taint; a source read from several repos is never
+  exempt.
+- A live gate re-stamps its rows every minute while its own taint is live; rows not
+  re-stamped for 3 minutes (the gate died, or its taint expired after 30 minutes idle) are
+  ignored, so a crashed client's taint does not block the next session for long.
+  `initialize` clears only this gate's own rows.
+- A store problem never breaks the proxy: the check uses this gate's own taint. A lock held
+  by another gate is retried on the next call (`taint_store_busy`); a corrupt or unwritable
+  file prints one WARN, counts `taint_store_error` and, after 3 in a row, sharing is off for
+  this gate.
 - Off by default; stdio only (`run-http` refuses a `taint_group`: an HTTP gate serves
   many clients and must not pool their taint).
 
@@ -212,6 +221,9 @@ taint_group: auto     # the MCP client that spawned this gate; or a name, e.g. m
   minutes idle), so a fresh session can inherit stale taint (warnings, not leaks);
 - any local process running as the same user can write or clear rows in the store
   (it could equally read the secrets directly);
+- a hostile MCP server in the group can make its gate write rows (by returning
+  secret-shaped text it marks itself private; by returning an injection, untrusted), so
+  it can cause warnings or blocks on the other servers' egress, never hide taint;
 - stdio is one session for the process; over HTTP the key is `Mcp-Session-Id`, so
   a client that rotates it starts clean, and one that floods new ids can evict
   other sessions' taint (the `taint_evicted` metric counts it);

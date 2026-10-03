@@ -8,9 +8,15 @@ their taint to one per-user SQLite file and read the group's rows on every egres
     group   `taint_group: <name>` in the policy, else env BASTIONGATE_TAINT_GROUP;
             `auto` = the MCP client that spawned this gate: on POSIX its process group
             (launchers like npx/uvx keep it), on Windows the nearest ancestor that is not
-            a launcher (venv python.exe, py, uv, uvx, cmd, npx's node wrapper)
-    rows    (group, writer, kind U|P, source "server:tool", repo, ts); a gate's own rows
-            are cleared on `initialize`; rows idle past TAINT_IDLE_SECONDS expire
+            a launcher (py, uv, uvx, cmd, a console-script shim, or the venv python.exe
+            redirector directly above this interpreter)
+    rows    one per (writer, kind U|P, source "server:tool"); a source read from several
+            repos keeps repo NULL (never exempt). A writer holds at most MAX_ROWS_PER_WRITER
+            rows, so one gate can never flood out the others' taint
+    life    live writers re-stamp their rows every HEARTBEAT_SECONDS while their own taint
+            is live; rows not re-stamped for STALE_SECONDS belong to a dead or idle gate and
+            are ignored (a crashed client's taint never blocks the next session for long);
+            a gate's own rows are cleared on `initialize`
     errors  never break the proxy: the caller falls back to its local taint
 
 stdio only: an HTTP gate serves many clients and must not pool them (http_proxy refuses
@@ -27,17 +33,24 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-TAINT_IDLE_SECONDS = 1800  # same as flows.TAINT_IDLE_SECONDS
-MAX_ROWS_PER_GROUP = 512
+HEARTBEAT_SECONDS = 60
+STALE_SECONDS = 180  # 3 missed heartbeats: the writer is gone or its taint expired
+MAX_ROWS_PER_WRITER = 64
+MAX_ROWS_TOTAL = 20_000  # the whole file, all groups
 GROUP_RE = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
-_TIMEOUT = 2.0  # seconds to wait for another gate's write lock
+WRITE_TIMEOUT = 1.0  # seconds to wait for another gate's write lock
+READ_TIMEOUT = 0.5  # the egress check sits on the proxy path: wait less
+
+
+class StoreBusy(Exception):
+    """Another gate held the lock past the timeout: transient, retried next time."""
 
 
 @dataclass(frozen=True)
 class Row:
     kind: str  # "U" untrusted | "P" private
     source: str  # "server:tool"
-    repo: str | None
+    repo: str | None  # None: no repo, or several (never exempt)
     writer: str = ""
 
 
@@ -49,9 +62,10 @@ def state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "bastiongate"
 
 
-# image names that only start another process (they sit between the client and the gate)
-LAUNCHERS = frozenset({"python.exe", "pythonw.exe", "py.exe", "pyw.exe", "uv.exe", "uvx.exe",
-                       "cmd.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "bastiongate.exe"})
+# image names that only start another process; python.exe counts only directly above
+# this interpreter (the venv redirector), never further up (it may be a Python client)
+LAUNCHERS = frozenset({"py.exe", "pyw.exe", "uv.exe", "uvx.exe", "cmd.exe", "conhost.exe",
+                       "bastiongate.exe"})
 
 
 def _windows_processes() -> dict[int, tuple[int, str]]:
@@ -90,6 +104,10 @@ def _auto_group() -> str:
     pid = os.getppid()
     try:
         procs = _windows_processes()
+        own_image = procs.get(os.getpid(), (0, ""))[1]
+        parent, image = procs.get(pid, (0, ""))
+        if image and image == own_image and parent:  # the venv redirector right above us
+            pid = parent
         for _ in range(16):  # ponytail: bounded walk; a deeper launcher chain stops here
             parent, image = procs.get(pid, (0, ""))
             if image not in LAUNCHERS or not parent:
@@ -101,63 +119,83 @@ def _auto_group() -> str:
 
 
 def resolve_group(policy_value: str | None) -> str | None:
+    """The group name, or None. Raises ValueError for an invalid env value (the policy
+    value is validated when the policy loads)."""
     value = policy_value or os.environ.get("BASTIONGATE_TAINT_GROUP") or None
-    if value == "auto":
-        return _auto_group()
-    return value
+    if value is not None and not GROUP_RE.fullmatch(value):
+        raise ValueError(f"BASTIONGATE_TAINT_GROUP {value[:80]!r} is not `auto` or a name of 1-64 "
+                         "letters, digits or _.:- characters")
+    return _auto_group() if value == "auto" else value
 
 
 class SharedTaint:
-    """One gate's view of its group's taint rows. Every method may raise
-    sqlite3.Error / OSError; FlowGuard catches them and falls back."""
+    """One gate's view of its group's taint rows. Methods raise StoreBusy on a lock
+    timeout (transient) and sqlite3.Error / OSError otherwise; FlowGuard handles both."""
 
     def __init__(self, group: str, server: str) -> None:
         self.group = group
         self.server = server
-        self.writer = uuid.uuid4().hex  # this gate process
+        self.writer = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"  # this gate process
         directory = state_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        if os.name != "nt":
-            os.chmod(directory, 0o700)
+        if not directory.exists():
+            directory.mkdir(mode=0o700, parents=True)  # only a dir we create gets our mode
         self.path = directory / "taint.sqlite"
-        with self._db() as db:
+        created = not self.path.exists()
+        with self._db(WRITE_TIMEOUT) as db:
             db.execute("CREATE TABLE IF NOT EXISTS taint (grp TEXT, writer TEXT, kind TEXT, "
                        "source TEXT, repo TEXT, ts REAL)")
             db.execute("CREATE INDEX IF NOT EXISTS taint_grp ON taint (grp, ts)")
-        if os.name != "nt":
+            db.execute("CREATE INDEX IF NOT EXISTS taint_writer ON taint (writer, kind, source)")
+        if created and os.name != "nt":
             os.chmod(self.path, 0o600)
 
-    def _db(self) -> _Closing:
+    def _db(self, timeout: float) -> _Closing:
         # default rollback journal: switching to WAL needs an exclusive lock that gates
         # starting together collide on; the busy timeout covers these tiny writes
-        return _Closing(sqlite3.connect(self.path, timeout=_TIMEOUT, isolation_level=None))
+        return _Closing(sqlite3.connect(self.path, timeout=timeout, isolation_level=None))
 
     def add(self, kind: str, tool: str, repo: str | None) -> None:
-        now = time.time()
-        with self._db() as db:
+        """Record (or re-stamp) one taint source. One row per (writer, kind, source): a
+        second repo for the same source turns the repo to NULL (never exempt)."""
+        now, source = time.time(), f"{self.server}:{tool}"
+        with self._db(WRITE_TIMEOUT) as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("DELETE FROM taint WHERE ts < ?", (now - TAINT_IDLE_SECONDS,))
-            db.execute("INSERT INTO taint VALUES (?, ?, ?, ?, ?, ?)",
-                       (self.group, self.writer, kind, f"{self.server}:{tool}", repo, now))
-            db.execute("DELETE FROM taint WHERE grp = ? AND rowid NOT IN "
-                       "(SELECT rowid FROM taint WHERE grp = ? ORDER BY ts DESC, rowid DESC LIMIT ?)",
-                       (self.group, self.group, MAX_ROWS_PER_GROUP))
+            db.execute("DELETE FROM taint WHERE ts < ?", (now - STALE_SECONDS,))
+            old = db.execute("SELECT rowid, repo FROM taint WHERE grp = ? AND writer = ? AND kind = ? "
+                             "AND source = ?", (self.group, self.writer, kind, source)).fetchone()
+            if old is None:
+                db.execute("INSERT INTO taint VALUES (?, ?, ?, ?, ?, ?)",
+                           (self.group, self.writer, kind, source, repo, now))
+            else:
+                db.execute("UPDATE taint SET ts = ?, repo = ? WHERE rowid = ?",
+                           (now, old[1] if old[1] == repo else None, old[0]))
+            db.execute("DELETE FROM taint WHERE writer = ? AND rowid NOT IN (SELECT rowid FROM taint "
+                       "WHERE writer = ? ORDER BY ts DESC, rowid DESC LIMIT ?)",
+                       (self.writer, self.writer, MAX_ROWS_PER_WRITER))
+            db.execute("DELETE FROM taint WHERE rowid NOT IN (SELECT rowid FROM taint "
+                       "ORDER BY ts DESC, rowid DESC LIMIT ?)", (MAX_ROWS_TOTAL,))
             db.execute("COMMIT")
 
+    def heartbeat(self) -> None:
+        """Re-stamp this writer's rows: they stay live while this gate's taint is."""
+        with self._db(WRITE_TIMEOUT) as db:
+            db.execute("UPDATE taint SET ts = ? WHERE writer = ?", (time.time(), self.writer))
+
     def rows(self) -> list[Row]:
-        """The group's live rows, oldest first."""
-        with self._db() as db:
+        """The group's live rows (re-stamped within STALE_SECONDS), oldest first."""
+        with self._db(READ_TIMEOUT) as db:
             cur = db.execute("SELECT kind, source, repo, writer FROM taint WHERE grp = ? AND ts >= ? "
-                             "ORDER BY ts, rowid", (self.group, time.time() - TAINT_IDLE_SECONDS))
+                             "ORDER BY ts, rowid", (self.group, time.time() - STALE_SECONDS))
             return [Row(k, s, r, w) for k, s, r, w in cur.fetchall()]
 
     def clear_own(self) -> None:
-        with self._db() as db:
+        with self._db(WRITE_TIMEOUT) as db:
             db.execute("DELETE FROM taint WHERE grp = ? AND writer = ?", (self.group, self.writer))
 
 
 class _Closing:
-    """sqlite3's own context manager commits but never closes the connection."""
+    """sqlite3's own context manager commits but never closes the connection; a lock
+    timeout surfaces as StoreBusy (transient), everything else as itself."""
 
     def __init__(self, db: sqlite3.Connection) -> None:
         self.db = db
@@ -165,5 +203,13 @@ class _Closing:
     def __enter__(self) -> sqlite3.Connection:
         return self.db
 
-    def __exit__(self, *exc) -> None:
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is not None and self.db.in_transaction:
+            try:
+                self.db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
         self.db.close()
+        if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc):
+            raise StoreBusy(str(exc)) from exc
+        return False

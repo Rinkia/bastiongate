@@ -40,7 +40,8 @@ MAX_TAINT_SESSIONS = 10000
 TAINT_IDLE_SECONDS = 1800
 # ponytail: private sources kept per session; the first one is enough to report
 MAX_PRIVATE_SOURCES = 32
-STORE_MAX_FAILURES = 3  # consecutive shared-store errors before falling back for good
+STORE_MAX_FAILURES = 3  # consecutive hard shared-store errors before falling back for good
+MAX_WRITTEN = 256  # (kind, tool) sources remembered as already in the shared store
 
 # pii.py kinds that make a forwarded result "private" (credentials, not contact data)
 SECRET_KINDS = frozenset({"private-key", "aws-access-key", "openai-key", "google-api-key",
@@ -149,26 +150,41 @@ class FlowGuard:
         self._bump = bump
         self.shared = shared  # taint_store.SharedTaint or None
         self._on_shared_error = on_shared_error or (lambda e: None)
-        self._written: set = set()  # (kind, tool, repo) already in the shared store
+        self._written: dict = {}  # (kind, tool) -> repo already in the shared store
         self._store_failures = 0
 
     def _shared(self, op, *args):
-        """Run a shared-store operation. A store error never breaks the proxy: the
-        check uses local taint only; after STORE_MAX_FAILURES in a row the store is
-        dropped for good (a corrupt or unwritable file, not a passing lock)."""
+        """Run a shared-store operation; returns (ok, result). A store error never
+        breaks the proxy: the check uses local taint only. A lock timeout (another gate
+        writing) is transient; after STORE_MAX_FAILURES other errors in a row (corrupt or
+        unwritable file) the store is dropped for good."""
+        from .taint_store import StoreBusy
+
         if self.shared is None:
-            return None
+            return False, None
         try:
             result = op(*args)
+        except StoreBusy:
+            self._bump("taint_store_busy")
+            return False, None
         except Exception as e:  # noqa: BLE001 - sqlite3.Error, OSError, corrupt file...
             self._store_failures += 1
             self._bump("taint_store_error")
             self._on_shared_error(e)
             if self._store_failures >= STORE_MAX_FAILURES:
                 self.shared = None
-            return None
+            return False, None
         self._store_failures = 0
-        return result
+        return True, result
+
+    def heartbeat(self) -> None:
+        """Re-stamp this gate's shared rows while its own taint is live, so other gates
+        keep seeing them; once it expires (or the gate dies) they go stale."""
+        now = time.monotonic()
+        with self._lock:
+            live = any(self._live(s, now) is not None for s in list(self._taint))
+        if live and self.shared is not None:
+            self._shared(self.shared.heartbeat)
 
     def _live(self, session, now: float) -> Taint | None:
         taint = self._taint.get(session)
@@ -213,12 +229,16 @@ class FlowGuard:
                 self._bump("taint_evicted")
             self._taint[session] = replace(taint, touched=now)
             self._taint.move_to_end(session)
-            new = [k for k in ((("U", tool, None),) if untrusted else ()) + ((("P", tool, repo),) if private else ())
-                   if k not in self._written]
-            self._written.update(new)
+            wanted = ((("U", tool, None),) if untrusted else ()) + ((("P", tool, repo),) if private else ())
+            new = [(k, t, r) for k, t, r in wanted if self._written.get((k, t), "-") != r]
         for kind, t, r in new:
-            if self.shared is not None:
-                self._shared(self.shared.add, kind, t, r)
+            ok, _ = self._shared(self.shared.add, kind, t, r) if self.shared is not None else (False, None)
+            if ok:  # remembered only once written: a failed write is retried next time
+                with self._lock:
+                    if (kind, t) in self._written or len(self._written) < MAX_WRITTEN:
+                        # a second repo for the same source is stored as "any repo" (None)
+                        prev = self._written.get((kind, t), r)
+                        self._written[(kind, t)] = r if prev == r else None
 
     def check(self, session, egress_repo: str | None) -> tuple[str, str, bool] | None:
         """(untrusted_from, private_from, cross_server) when an egress call would
@@ -232,7 +252,7 @@ class FlowGuard:
                 self._taint[session] = replace(taint, touched=now)
                 self._taint.move_to_end(session)
         taint = taint or Taint()
-        rows = self._shared(self.shared.rows) if self.shared is not None else None
+        rows = self._shared(self.shared.rows)[1] if self.shared is not None else None
         others = [r for r in rows or () if r.writer != self.shared_writer()]
         untrusted, cross_u = taint.untrusted_from, False
         if untrusted is None:

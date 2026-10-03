@@ -62,13 +62,7 @@ class Gate:
         self._lock = threading.Lock()
         self._metrics: Counter = Counter()
         self._metrics_lock = threading.Lock()
-        group = taint_store.resolve_group(policy.taint_group) if transport == "stdio" else None
-        if group and policy.scan_flows:
-            try:
-                self.flows.shared = taint_store.SharedTaint(group, server_name)
-            except Exception as e:  # noqa: BLE001 - never fatal: local taint still works
-                self._bump("taint_store_error")
-                self._shared_taint_error(e)
+        self._setup_shared_taint(policy, transport, server_name)
         self._inspect = make_inspector(policy)  # tool-result inspector
 
     def _bump(self, name: str, n: int = 1) -> None:
@@ -273,6 +267,30 @@ class Gate:
                 self._record_taint(out, tool or "", repo, flagged, session)
             return out
         return msg
+
+    def _setup_shared_taint(self, policy: GatePolicy, transport: str, server_name: str) -> None:
+        if transport != "stdio" or not policy.scan_flows:
+            return
+        try:
+            group = taint_store.resolve_group(policy.taint_group)
+            if group:
+                self.flows.shared = taint_store.SharedTaint(group, server_name)
+                self.trace.emit("taint_group", group=group, server=server_name)
+        except Exception as e:  # noqa: BLE001 - never fatal: local taint still works
+            self._bump("taint_store_error")
+            self._shared_taint_error(e)
+
+    def start_heartbeat(self) -> None:
+        """Keep this gate's shared taint rows fresh (a daemon thread; stdio runs only)."""
+        if self.flows.shared is None:
+            return
+
+        def beat() -> None:
+            while True:
+                time.sleep(taint_store.HEARTBEAT_SECONDS)
+                self.flows.heartbeat()
+
+        threading.Thread(target=beat, name="bastiongate-taint-heartbeat", daemon=True).start()
 
     def _shared_taint_error(self, e: Exception) -> None:
         self.trace.emit("taint_store_error", reason=type(e).__name__)
@@ -609,6 +627,7 @@ def run_stdio(server_argv: list[str], policy: GatePolicy, log_path: str | None =
     trace = Trace(log_path)
     name = re.sub(r"[^A-Za-z0-9_.:-]", "", os.path.splitext(os.path.basename(server_argv[-1]))[0])[:64]
     gate = Gate(policy, trace, server_name=name or "upstream")  # initialize's serverInfo.name wins
+    gate.start_heartbeat()
     proc = subprocess.Popen(
         server_argv,
         stdin=subprocess.PIPE,

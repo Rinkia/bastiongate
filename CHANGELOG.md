@@ -10,6 +10,12 @@
   `auto` = the spawning MCP client (POSIX process group; Windows nearest non-launcher
   ancestor). stdio only; off by default. Store errors fall back to local taint (one
   WARN, `taint_store_error`).
+- Security review (2026-10-03) fixes before release: rows are one per source and capped per
+  gate (no flood eviction of other gates' taint); a failed write is retried and a busy lock
+  never disables sharing; live gates re-stamp their rows and stale rows (dead or idle
+  gates) are ignored after 3 minutes; `auto` no longer treats a Python MCP client as a
+  launcher; the env group name is validated; the state directory mode is set only when the
+  gate creates it.
 - Evidence: live smoke, official MCP SDK 2.2.0 client with two `bastiongate run` processes
   (fetch-like and filesystem-like servers): with `taint_group: auto` or a name, the egress
   fetch after a cross-server private read is blocked (-32005, `private_from:
