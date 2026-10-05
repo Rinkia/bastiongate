@@ -11,13 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 from collections import Counter, OrderedDict, deque
 
-from . import flows, guards, jsonrpc, pii
+from . import flows, guards, jsonrpc, pii, taint_store
 from .inspectors import make_inspector
 from .policy import BLOCK, REDACT, WARN, GatePolicy
 from .trace import Trace
@@ -47,19 +48,21 @@ def _stderr_warn(line: str) -> None:
 
 class Gate:
     def __init__(self, policy: GatePolicy, trace: Trace | None = None, *,
-                 warn=_stderr_warn, transport: str = "stdio") -> None:
+                 warn=_stderr_warn, transport: str = "stdio", server_name: str = "upstream") -> None:
         self.policy = policy
         self.trace = trace or Trace(None)
         self._warn = warn  # operator-visible one-liners (stderr by default)
         self._transport = transport  # stdio: one process session | http: per Mcp-Session-Id
         self._warned_once: set[str] = set()
         self.labels = flows.Labels()
-        self.flows = flows.FlowGuard(self._bump)
+        self.server_name = server_name
+        self.flows = flows.FlowGuard(self._bump, on_shared_error=self._shared_taint_error)
         self._pending: dict = {}  # (session, id) -> (method, tool, ts)
         self._order: OrderedDict = OrderedDict()  # session -> deque of keys; LRU order
         self._lock = threading.Lock()
         self._metrics: Counter = Counter()
         self._metrics_lock = threading.Lock()
+        self._setup_shared_taint(policy, transport, server_name)
         self._inspect = make_inspector(policy)  # tool-result inspector
 
     def _bump(self, name: str, n: int = 1) -> None:
@@ -161,11 +164,11 @@ class Gate:
         hit = self.flows.check(session, flows.repo_of(name, args))
         if hit is None:
             return None
-        untrusted_from, private_from = hit
+        untrusted_from, private_from, cross = hit
         action = self.policy.opt(name, "on_tainted_egress")
         self.trace.emit("tainted_egress", id=mid, tool=name, action=action, labels=sorted(labels),
                         untrusted_from=untrusted_from, private_from=private_from,
-                        session=_session_hash(session))
+                        session=_session_hash(session), cross_server=cross)
         if action == BLOCK:
             self._bump("tainted_egress_blocked")
             return jsonrpc.error_response(
@@ -265,14 +268,51 @@ class Gate:
             return out
         return msg
 
+    def _setup_shared_taint(self, policy: GatePolicy, transport: str, server_name: str) -> None:
+        if transport != "stdio" or not policy.scan_flows:
+            return
+        try:
+            group = taint_store.resolve_group(policy.taint_group)
+            if group:
+                self.flows.shared = taint_store.SharedTaint(group, server_name)
+                self.trace.emit("taint_group", group=group, server=server_name)
+        except Exception as e:  # noqa: BLE001 - never fatal: local taint still works
+            self._bump("taint_store_error")
+            self._shared_taint_error(e)
+
+    def start_heartbeat(self) -> None:
+        """Keep this gate's shared taint rows fresh (a daemon thread; stdio runs only)."""
+        if self.flows.shared is None:
+            return
+
+        def beat() -> None:
+            while True:
+                time.sleep(taint_store.HEARTBEAT_SECONDS / 2)
+                try:
+                    self.flows.heartbeat()
+                except Exception:  # noqa: BLE001 - the heartbeat must never die silently
+                    self._bump("taint_heartbeat_error")
+
+        threading.Thread(target=beat, name="bastiongate-taint-heartbeat", daemon=True).start()
+
+    def _shared_taint_error(self, e: Exception) -> None:
+        self.trace.emit("taint_store_error", reason=type(e).__name__)
+        if self._once("taint_store_error"):
+            self._warn(f"bastiongate: WARN shared taint store unavailable ({type(e).__name__}: {e}); "
+                       "the flow guard falls back to this server's own taint")
+
     def _check_instructions(self, msg: dict) -> dict:
         """initialize.result.instructions (and serverInfo) reach the model, often in the
         system prompt: scanned like a tool definition. A poisoned one is removed (under
         on_poisoned_tool: block), the way a poisoned tool is dropped from a listing."""
         result = msg.get("result")
+        info = result.get("serverInfo") if isinstance(result, dict) and isinstance(result.get("serverInfo"), dict) else {}
+        if isinstance(info.get("name"), str) and taint_store.GROUP_RE.fullmatch(info["name"]):
+            self.server_name = info["name"]  # labels this gate's rows in the shared store
+            if self.flows.shared is not None:
+                self.flows.shared.server = info["name"]
         if not self.policy.scan_tools or not isinstance(result, dict):
             return msg
-        info = result.get("serverInfo") if isinstance(result.get("serverInfo"), dict) else {}
         info_text = "\n".join(v for v in (info.get(k) for k in ("name", "title", "description")) if isinstance(v, str))
         bad = {key: d.reason for key, text in (("instructions", result.get("instructions")), ("serverInfo", info_text))
                if isinstance(text, str) and text and not (d := guards.scan_result_text(text)).allowed}
@@ -588,7 +628,9 @@ def _session_hash(session) -> str | None:
 def run_stdio(server_argv: list[str], policy: GatePolicy, log_path: str | None = None) -> int:
     """Run the gate between this process's stdio and a spawned MCP server."""
     trace = Trace(log_path)
-    gate = Gate(policy, trace)
+    name = re.sub(r"[^A-Za-z0-9_.:-]", "", os.path.splitext(os.path.basename(server_argv[-1]))[0])[:64]
+    gate = Gate(policy, trace, server_name=name or "upstream")  # initialize's serverInfo.name wins
+    gate.start_heartbeat()
     proc = subprocess.Popen(
         server_argv,
         stdin=subprocess.PIPE,
