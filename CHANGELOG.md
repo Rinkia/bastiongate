@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.0 (unreleased)
+## 0.13.0 (2026-10-05)
 
 - With `scrub_results`, secrets in text blobs (decoded, redacted, re-encoded) and in
   `resource_link` name/title/description are redacted too; URIs are also scanned
@@ -26,7 +26,7 @@
   `bastiontrace analyze --otel` on the gate's file reports LANDED (inject in `fetch_page`,
   landing on `send_email`), with the AWS key in the payload redacted in the file.
 
-## 0.12.0 (unreleased)
+## 0.12.0 (not released separately: included in 0.13.0)
 
 - **Cross-server taint (E4), opt-in.** `taint_group: auto | <name>` (or env
   `BASTIONGATE_TAINT_GROUP`): the flow guard of every gate in the group also sees the
@@ -50,7 +50,7 @@
   fetch after a cross-server private read is blocked (-32005, `private_from:
   fssrv:read_file`); without a group it is forwarded, as before.
 
-## 0.11.0 (unreleased)
+## 0.11.0 (not released separately: included in 0.13.0)
 
 - **BEHAVIOR: prompts and listings are checked** (`scan_prompts`, default true, per-prompt
   override under `prompts/get`).
@@ -74,7 +74,7 @@
   spell with them (Indic, Arabic-script...), never between Cyrillic/Latin homoglyphs, and are
   removed before phrase matching.
 
-## 0.10.0 (unreleased)
+## 0.10.0 (not released separately: included in 0.13.0)
 
 - **BEHAVIOR: resource content is scanned.** Embedded `resource` blocks (text, and text-MIME
   blobs decoded), `resource_link` name/title/description, and `resources/read` responses now
