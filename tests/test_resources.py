@@ -248,6 +248,26 @@ def test_scrub_redacts_resource_text_and_resources_read():
     assert KEY not in out["result"]["contents"][0]["text"]
 
 
+def test_scrub_redacts_text_blob_and_resource_link():
+    gate, _, _ = make(scrub_results=True)
+    blob = base64.b64encode(f"aws={KEY}".encode()).decode()
+    out = call(gate, [res(blob=blob, mime="text/plain"),
+                      {"type": "resource_link", "uri": "file:///k", "name": "k", "description": f"key {KEY}"}])
+    got = base64.b64decode(out["result"]["content"][0]["resource"]["blob"]).decode()
+    assert KEY not in got and "aws=" in got
+    assert KEY not in out["result"]["content"][1]["description"]
+    image = base64.b64encode(b"\x89PNG" + KEY.encode()).decode()
+    out = call(gate, [res(blob=image, mime="image/png")], mid=2)
+    assert out["result"]["content"][0]["resource"]["blob"] == image  # media is never rewritten
+
+
+def test_percent_encoded_uri_is_scanned():
+    gate, _, _ = make()
+    uri = "http://x/" + __import__("urllib.parse").parse.quote(P)
+    out = call(gate, [{"type": "resource_link", "uri": uri, "name": "n"}])
+    assert out["error"]["code"] == BLOCK_RESULT_CODE
+
+
 def test_secret_in_resource_taints_private():
     gate, _, _ = make()
     call(gate, [res(text=f"key={KEY}")])

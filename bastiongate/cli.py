@@ -30,6 +30,7 @@ def main(argv=None) -> int:
     pr.add_argument("--log", help="write a JSONL trace of every call")
     pr.add_argument("--no-scan-tools", action="store_true", help="don't scan tools/list")
     pr.add_argument("--no-scan-results", action="store_true", help="don't scan tool results")
+    _otel_args(pr)
     pr.add_argument("server", nargs=argparse.REMAINDER,
                     help="-- then the MCP server command to run")
 
@@ -43,6 +44,7 @@ def main(argv=None) -> int:
     ph.add_argument("--log", help="write a JSONL trace of every call")
     ph.add_argument("--no-scan-tools", action="store_true", help="don't scan tools/list")
     ph.add_argument("--no-scan-results", action="store_true", help="don't scan tool results")
+    _otel_args(ph)
 
     pl = sub.add_parser("labels", help="show the flow-guard labels each tool gets, and why")
     pl.add_argument("--policy", help="gate policy YAML/JSON (per-tool `labels`, `label_packs`)")
@@ -59,7 +61,7 @@ def main(argv=None) -> int:
             print("bastiongate: give a server command after --", file=sys.stderr)
             return 2
         policy = _apply_flags(load_policy(args.policy) if args.policy else GatePolicy(), args)
-        return run_stdio(server_argv, policy, args.log)
+        return run_stdio(server_argv, policy, args.log, _otel_sink(args))
 
     if args.cmd == "run-http":
         import os
@@ -68,9 +70,28 @@ def main(argv=None) -> int:
 
         policy = _apply_flags(load_policy(args.policy) if args.policy else GatePolicy(), args)
         auth_key = args.auth_key or os.environ.get("BASTIONGATE_PROXY_KEY")
-        return run_http(args.upstream, policy, args.host, args.port, args.log, auth_key)
+        return run_http(args.upstream, policy, args.host, args.port, args.log, auth_key, _otel_sink(args))
 
     return 2
+
+
+def _otel_args(p) -> None:
+    p.add_argument("--otel-out", help="write OTel GenAI execute_tool spans (OTLP/JSON lines) to this file")
+    p.add_argument("--otel-endpoint", help="POST spans to this OTLP/HTTP collector (https, or http on loopback); "
+                                          "headers from OTEL_EXPORTER_OTLP_HEADERS")
+    p.add_argument("--otel-content", action="store_true",
+                   help="include tool arguments/results in spans (PII-scrubbed, capped); default: hashes only")
+
+
+def _otel_sink(args):
+    if not (args.otel_out or args.otel_endpoint):
+        return None
+    from .otel import OtelSink
+
+    try:
+        return OtelSink(path=args.otel_out, endpoint=args.otel_endpoint, content=args.otel_content)
+    except ValueError as e:
+        raise SystemExit(f"bastiongate: {e}")
 
 
 def _cmd_labels(args) -> int:

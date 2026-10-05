@@ -2,6 +2,19 @@
 
 ## Open
 
+### Small follow-ups from the 2026-10-02/03 reviews
+
+**What:**
+- Make the tools/list page cap (5M) configurable.
+- Windows `taint_group: auto`: Python MCP clients started directly (no venv) from one shell share a group (false warnings); key on the client's creation time or warn.
+- bastionmesh: switch `request_scan` to `bastiongate.guards.scan_instruction_text` once it pins bastiongateway >= 0.11.
+
+**Why:** LOW findings deferred by the security reviews; each is documented in the README Limits.
+
+**Effort:** S each
+**Priority:** P3
+**Depends on:** none.
+
 ### Scan prompts and the resource/prompt listings (done in 0.11.0, branch feat/prompts-scan)
 
 **What:** scan `prompts/get` results (`messages[].content`) and the names/descriptions in `resources/list`, `resources/templates/list` and `prompts/list`.
@@ -76,7 +89,7 @@ Typical messages (KBs) cost about 1 ms.
 **Priority:** P2
 **Depends on:** gate 0.9.0.
 
-### T3: gate as an OTel GenAI span producer
+### T3: gate as an OTel GenAI span producer (done in 0.13.0, branch feat/otel-spans)
 
 **What:** Emit `execute_tool` spans with hashed content plus verdict attributes, so gate plugs into existing observability stacks and bastiontrace gets traces the suite guarantees exist.
 

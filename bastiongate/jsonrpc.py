@@ -10,6 +10,7 @@ import base64
 import binascii
 import json
 import re
+import urllib.parse
 from typing import IO, Iterator
 
 
@@ -84,12 +85,26 @@ def _blob_text(blob: str, mime) -> str | None:
         return None
 
 
+def _uri(uri: str) -> str:
+    """A URI as the model may read it: percent-escapes decoded too (both forms scanned)."""
+    decoded = urllib.parse.unquote(uri)
+    return uri if decoded == uri else f"{uri}\n{decoded}"
+
+
+def blob_text(res: dict) -> str | None:
+    """The text inside a resource's blob, as _blob_text decodes it, or None."""
+    blob = res.get("blob")
+    return _blob_text(blob, res.get("mimeType")) if isinstance(blob, str) and blob else None
+
+
 def resource_texts(res) -> list[str]:
     """Text a model can read from one resource (an embedded `resource` or a
     `resources/read` contents entry): `uri`, `text`, and `blob` decoded (see _blob_text)."""
     if not isinstance(res, dict):
         return []
-    out = [res[k] for k in ("uri", "text") if isinstance(res.get(k), str)]
+    out = [_uri(res["uri"])] if isinstance(res.get("uri"), str) else []
+    if isinstance(res.get("text"), str):
+        out.append(res["text"])
     blob = res.get("blob")
     if isinstance(blob, str) and blob:
         text = _blob_text(blob, res.get("mimeType"))
@@ -109,7 +124,8 @@ def _block_texts(block, resources: bool) -> list[str]:
     if kind == "resource":
         return resource_texts(block.get("resource"))
     if kind == "resource_link":  # uri/name/title/description reach the model
-        return [str(block[k]) for k in ("uri", "name", "title", "description") if isinstance(block.get(k), str)]
+        return [_uri(block[k]) if k == "uri" else block[k]
+                for k in ("uri", "name", "title", "description") if isinstance(block.get(k), str)]
     return []
 
 

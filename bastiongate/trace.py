@@ -33,3 +33,19 @@ class Trace:
             with self._lock:
                 self._fh.close()
                 self._fh = None
+
+
+class TeeTrace(Trace):
+    """Forward every event to `inner` and to `listener(event, fields)` (the OTel sink)."""
+
+    def __init__(self, inner: Trace, listener) -> None:
+        super().__init__(None)
+        self.inner = inner
+        self.listener = listener
+
+    def emit(self, event: str, **fields) -> None:
+        self.inner.emit(event, **fields)
+        self.listener(event, fields)
+
+    def close(self) -> None:
+        self.inner.close()
