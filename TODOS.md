@@ -2,6 +2,56 @@
 
 ## Open
 
+### Scan prompts and the resource/prompt listings
+
+**What:** scan `prompts/get` results (`messages[].content`) and the names/descriptions in `resources/list`, `resources/templates/list` and `prompts/list`.
+
+**Why:** the 2026-10-02 security review: an injection there reaches the model unscanned (when the client shows them to it).
+
+**Context:** prompts are instructions by design (the user picks one), so the full signature set would false-positive on ordinary prompt templates. Apply the request-direction checks (hidden-unicode, known corpus payloads, encoded known payloads) as bastionmesh does for delegations, and the full set to listing descriptions like tools/list.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** none.
+
+### Decoder cost on big encoded content (mostly done)
+
+**Done 2026-10-02:** bastioncorpus perf pass (1 MB base64 1.5 s -> 0.4 s, hex 2.4 s -> 0.3 s, bench identical); the gate encoded scan of 1 MB takes about 0.5 s; agentbastion shadow about 1.5 s (was 5.5 s); tool definitions over 1M characters fail closed instead of being scanned. Remaining below is the original note; what is left is a single combined pass, only worth it if real traffic shows MB-sized results.
+
+
+**What:** speed up `bastioncorpus.variants` on large encoded runs, or cap decode input lower on the runtime path.
+
+**Why:** the 2026-10-01 re-review measured the remaining per-message costs, from the single decode each path still pays:
+- 1 MB of base64 costs about 1.4 s in the gate's encoded scan and 1.7 to 5 s per piece in the mesh;
+- agentbastion in shadow takes about 5.5 s on that same 1 MB, against 1.4 s with the detector off;
+- `poisoned_tool_names`, the plain scan, which predates this work, is slightly superlinear: 6 s at 20 MB, with no size cap.
+
+Typical messages (KBs) cost about 1 ms.
+
+**Context:** the redundant decodes are already gone, so this is the floor of one decode. Options:
+- one combined pass over the text instead of 13 regex passes;
+- lower caps on the hot path (fail closed under block);
+- a size cap on `tools/list` definitions for the plain scan.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** none.
+
+### Whole-text decode views in the runtime scanners (done, opt-in)
+
+**Done 2026-10-02:** gate `decode_transforms` and mesh `actions.decode_transforms`, off by default; bench defender `supply+transforms`. Open: flip the default after 20 real sessions with 0 false warnings; improve the spaced-letters view (8%).
+
+
+**What:** run the rot13 / leet / reversed / spaced-letter views (`bastioncorpus.variants(text, transforms=True)`) on tool results in the gate and on replies in bastionmesh, not only in agentbastion's input guard.
+
+**Why:** v0.10 decodes encoded runs only (base64, hex, binary...), so a rot13 or reversed payload planted in a web page passes the gate. encoding-bench (2026-10-01): supply/gate catch about 1% of rot13/leet/reversed rows, against 88% for the run-based encodings.
+
+**Context:** deferred by D3 of the encoded-payload eng review (`bastion-decode-DESIGN.md`): whole-text views multiply the scan work on every result and add false-positive surface. Decide with encoding-bench numbers on cost per result, extra catches and benign FP rate. Start in `guards.scan_encoded_text`.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** bastioncorpus 0.5 + bastionprobe encoding-bench (both done).
+
 ### E2: runtime A2A gate (bastionmesh)
 
 **Status (2026-09-30):** moved to its own tool, [github.com/Rinkia/bastionmesh](https://github.com/Rinkia/bastionmesh) (v0.1.0 built, not yet on PyPI). Its follow-ups live in bastionmesh/TODOS.md. Kept here for history.
@@ -37,6 +87,10 @@
 
 
 ## Completed
+
+### Scan `resource` content blocks (done in 0.10.0)
+
+Embedded resources, resource links and `resources/read` responses go through every result check; `scan_resources: false` is the kill switch. Design: `../gate-gaps-DESIGN.md` G1.
 
 ### A2 follow-ups outside this repo (done)
 

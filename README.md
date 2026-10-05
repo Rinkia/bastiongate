@@ -195,15 +195,88 @@ tools:
 - a tool with no label is never treated as egress, and auto labels need a
   `tools/list` first (packs and policy labels apply immediately);
 - a private read counts only from its labelled tool or a credential-shaped secret
-  in a forwarded **text** block (not embedded `resource` blocks); an injection
+  in the forwarded result (text, resource and `resources/read` content); an injection
   inside a private read counts as untrusted only if the result inspector flags it;
 - the very first egress call is checked before its own result taints the session,
   so exfiltration needs untrusted and private reads to have happened earlier;
-- a tool call whose response takes longer than 5 minutes loses correlation, and
-  its result is not labelled.
+- a tool call whose response takes longer than 5 minutes loses correlation: its
+  result is still scanned (as `(unmatched)`) but not labelled.
 
 Older gates silently ignore these keys: `bastionsupply doctor --policy policy.yaml`
 warns when bastiongateway < 0.9 would read them.
+
+### Encoded injection in results (`on_encoded_result`)
+
+A payload hidden in base64, hex, binary, base32, ascii85/base85, Morse or escapes reads as
+noise to a text filter but plainly to the model. The gate decodes each tool result
+(bastioncorpus `variants`) and runs bastionsupply's `encoded-injection` check on the decoded
+views.
+
+```yaml
+on_encoded_result: warn      # warn (default, shadow) | block (-32006)
+decode_transforms: false     # true = also rot13 / leet / reversed / spaced views (results <= 64 KB)
+tools:
+  fetch: {on_encoded_result: block}
+```
+
+- `warn` forwards the result, logs `encoded_injection`, prints a WARN line, and counts the
+  result as untrusted for the flow guard.
+- `block` replaces it with error -32006.
+- Encoded injections in `tools/list` definitions are warned about, never dropped.
+- A tool definition over 1,000,000 characters, or every tool from the one that takes a
+  `tools/list` page past 5,000,000 characters, is not scanned at all: it is handled like a
+  poisoned tool (event `tools_list_oversize`). Tool scans read `description`, `title`,
+  `annotations.title`, `outputSchema` and `inputSchema`.
+
+**Limits:**
+- Results over 1,000,000 characters are not decoded. They are refused under `block`, and only
+  logged (`encoded_scan_skipped`) under `warn`.
+- rot13, leetspeak and reversed text are decoded only with `decode_transforms: true` (off by
+  default), and only on results up to 64 KB; a bigger result gets the run-based views only and
+  the trace event `encoded_transforms_skipped`. Spaced-out letters are mostly missed (8% on
+  the bench).
+- Made-up ciphers can't be decoded by enumeration. Tool allow/deny lists and the flow guard
+  are the controls encoding cannot bypass.
+
+### Resource content (`scan_resources`)
+
+Since 0.10 every result check reads all the text the model can see, not only `text` blocks:
+- embedded `resource` blocks: `uri`, `text`, and `blob` base64-decoded (standard or url-safe,
+  any MIME type except media: a text type decodes leniently, anything else counts when it is
+  valid UTF-8; images other than SVG, audio, video, fonts, PDF and zip are never decoded);
+- `resource_link` blocks (`uri`, `name`, `title`, `description`);
+- `resources/read` responses (`contents[]`), checked under the pseudo tool name
+  `resources/read`;
+- an upstream JSON-RPC error on a `tools/call` or `resources/read` (`message` and `data`):
+  clients show tool errors to the model;
+- a response with no pending request (late past 5 minutes, duplicate id, unknown id): it is
+  scanned under the pseudo tool name `(unmatched)` instead of passing through (trace event
+  `response_unmatched`); an uncorrelated `tools/list` result is filtered like any other.
+
+The `initialize` result's `instructions` and `serverInfo` (clients often put them in the
+system prompt) are scanned like a tool definition: under `on_poisoned_tool: block` poisoned
+`instructions` are removed and a poisoned `serverInfo` is replaced by `{"name": "upstream"}`
+(event `instructions_poisoned`). A response the gate cannot inspect at all is replaced by
+error -32002 (event `response_uninspectable`), never forwarded and never a crash. With
+`scrub_results`, secrets in an upstream error message are redacted too.
+
+The plain injection scan (-32002), the encoded scan (-32006), the PII scrub and the flow-guard
+taint all see this text. Clean resources are forwarded unchanged.
+
+```yaml
+scan_resources: true           # default; false = the 0.9 behaviour (text blocks only)
+tools:
+  resources/read: {on_injected_result: warn}
+```
+
+`scan_resources: false` drops resource text from `tools/call` scans and lets `resources/read`
+responses through entirely (no scan, scrub or taint), as in 0.9.
+
+**Limits:**
+- `prompts/get` messages, and the names and descriptions in `resources/list`,
+  `resources/templates/list` and `prompts/list`, are not scanned (TODOS.md).
+- The PII scrub redacts `resource.text` but never rewrites a blob or a `resource_link`.
+- Media blobs (images, audio, PDF...) are not inspected: the model receives them as media.
 
 ### Argument PII/secret scrub
 
