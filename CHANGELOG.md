@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.11.0 (unreleased)
+
+- **BEHAVIOR: prompts and listings are checked** (`scan_prompts`, default true, per-prompt
+  override under `prompts/get`).
+  - `prompts/get`: hidden/control unicode, known bastioncorpus payloads and encoded known
+    payloads only (templates are instructions by design). Blocks under the default
+    `on_injected_result: block` (-32002).
+  - `resources/list`, `resources/templates/list`, `prompts/list`: poisoned, oversize or
+    malformed entries are dropped under `on_poisoned_tool: block`.
+  - Uncorrelated responses of these shapes are routed to the same checks.
+- Evidence: on 1,015 real skill and agent files, the prompt checks flagged no prompt (one hit:
+  stray byte-order marks and a zero-width space in a CHANGELOG); the full signature set would
+  have flagged 98.
+- Security review (2026-10-03) fixes before release: an extra empty `messages`/listing key can
+  no longer downgrade a tool result to the prompt checks; prompt descriptions without
+  messages, prompt argument titles and variation-selector steganography are covered; known
+  payloads match through look-alike letters, markdown emphasis and a dropped final period;
+  ZWJ/ZWNJ in Indic and Arabic-script text no longer false-positive; prompts over 1M
+  characters fail closed under block.
+- Second review round: a `tools/list` or listing response that also carries `messages` or
+  tool-result content gets the full result checks; ZWJ/ZWNJ are exempt only in scripts that
+  spell with them (Indic, Arabic-script...), never between Cyrillic/Latin homoglyphs, and are
+  removed before phrase matching.
+
 ## 0.10.0 (unreleased)
 
 - **BEHAVIOR: resource content is scanned.** Embedded `resource` blocks (text, and text-MIME
