@@ -145,6 +145,29 @@ Each tool gets labels: `untrusted` (its result is attacker-reachable content),
   JSON-RPC error `-32005` naming the tools involved (never the content). The
   default moves to `block` only after the replay suite passes and a dogfood run
   over ≥ 20 real sessions shows 0 false blocks on benign flows.
+
+  **Measuring that bar** (since 0.14.0) — run the gate with `--log`, then:
+
+  ```bash
+  bastiongate run --log gate.jsonl -- npx -y @some/mcp-server
+  bastiongate log gate.jsonl --summary
+  ```
+
+  ```json
+  {
+    "tool": "bastiongate",
+    "unit": "session",
+    "counted_as": "one MCP session (stdio: one proxy process; HTTP: one Mcp-Session-Id)",
+    "records": 412, "sessions": 7, "runs": 7,
+    "fired_by_rule": {"tainted_egress": 3},
+    "by_action": {"tainted_egress": {"warn": 3}}
+  }
+  ```
+
+  Without `--log` nothing is recorded, and `log --summary` then says so rather
+  than printing zeros — an unmeasured run must never read as a clean one. The
+  tally reports only what the log observed; whether a block was *false* is your
+  judgement, so keep that in your dogfood notes.
 - **Where labels come from** (first match wins): per-tool `labels` in the policy
   → built-in packs for common servers (exact tool names) → auto (bastionsupply
   capability categories; auto only ever adds `egress`). See what each tool gets:

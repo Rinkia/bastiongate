@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.14.0 (unreleased)
+
+**The flow-guard promotion bar is measurable.** No detector behaviour changed.
+
+The flow guard ships in warn mode behind a written bar — 20+ real sessions with 0 false blocks on
+benign flows, then `on_tainted_egress` defaults to `block`. Nothing could report those numbers, so
+the bar could never be met. (It wasn't alone: three of the suite's four bars had no instrumentation.)
+
+- **`bastiongate log <path> --summary`** prints the tally in the suite's shared shape, via the new
+  `bastioncorpus.tally`: `records`, `sessions`, `fired_by_rule`, `shadow_notes`, `window`, plus
+  `unit` and `counted_as` so a bar always states what it counted. Gate-specific extras: `runs`,
+  and `by_action` — the warn-versus-block split, which is the number the bar is actually about.
+  Read-only, and it reports the observable split only. Whether a block was *false* is a human
+  judgement and stays in the dogfood notes.
+- **New `session_seen` event**, emitted once per session. Previously only `tainted_egress` carried
+  a session id, so a session where nothing fired left no trace at all — and the bar is 20
+  sessions, most of them clean. In stdio, where one process *is* the session and there is no id, a
+  per-process run id stands in, so several runs appending to one log still count as several
+  sessions.
+- A **missing** log reports null counts and a note rather than zeros: an unmeasured run must never
+  read as a clean one. An **empty** log reports zeros.
+- `bastioncorpus>=0.6.0` is now a direct dependency. It was already present transitively through
+  bastionsupply; importing it directly means declaring it.
+
+Fixed while adding the above: `session_seen` was not in `otel.INFO_EVENTS`, so every forwarded
+call's OTel span reported `bastion.gate.verdict = warned` instead of `forwarded` — the new
+bookkeeping event silently corrupted the gate's own telemetry. Caught by the existing OTel span
+test; now has a regression test of its own.
+
+Design: `suite-tally-DESIGN.md` at the workspace root.
+
 ## 0.13.0 (2026-10-05)
 
 - With `scrub_results`, secrets in text blobs (decoded, redacted, re-encoded) and in

@@ -51,7 +51,9 @@ MAX_NAME_CHARS = 256
 MAX_SCRUB_CHARS = 1_000_000  # bigger arguments: digest only, no content (bounded work on the pump)
 TRUNCATED = "...[truncated by bastiongate]"
 HTTP_DEADLINE = 10.0  # whole POST, connect to last byte
-INFO_EVENTS = frozenset({"tool_call", "response_unmatched", "taint_group"})  # not a warning
+INFO_EVENTS = frozenset({"tool_call", "response_unmatched", "taint_group",
+                         "session_seen"})  # bookkeeping for the tally, not a verdict
+
 # argument keys whose values are secrets whatever they look like: the key with
 # separators removed ends with one of these ("db_password", "githubToken", "x-api-key")
 _SECRET_SUFFIXES = ("password", "passwd", "passphrase", "passcode", "secret", "token", "apikey",

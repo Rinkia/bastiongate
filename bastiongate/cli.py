@@ -46,6 +46,12 @@ def main(argv=None) -> int:
     ph.add_argument("--no-scan-results", action="store_true", help="don't scan tool results")
     _otel_args(ph)
 
+    plg = sub.add_parser("log", help="summarize a --log JSONL trace (the promotion-bar tally)")
+    plg.add_argument("path", help="the JSONL file written by `run --log` / `run-http --log`")
+    plg.add_argument("--summary", action="store_true",
+                     help="print the tally (currently the only mode; kept explicit for parity "
+                          "with the other tools)")
+
     pl = sub.add_parser("labels", help="show the flow-guard labels each tool gets, and why")
     pl.add_argument("--policy", help="gate policy YAML/JSON (per-tool `labels`, `label_packs`)")
     pl.add_argument("tools", nargs="?", help="a tools/list JSON dump; omit to list the built-in packs")
@@ -54,6 +60,9 @@ def main(argv=None) -> int:
 
     if args.cmd == "labels":
         return _cmd_labels(args)
+
+    if args.cmd == "log":
+        return _cmd_log(args)
 
     if args.cmd == "run":
         server_argv = _strip_dashes(args.server)
@@ -92,6 +101,53 @@ def _otel_sink(args):
         return OtelSink(path=args.otel_out, endpoint=args.otel_endpoint, content=args.otel_content)
     except ValueError as e:
         raise SystemExit(f"bastiongate: {e}")
+
+
+# The events that mean "a detector fired", keyed to the bars they feed. The
+# flow-guard bar is written in sessions, which is why `session_seen` exists.
+_BAR_EVENTS = ("tainted_egress", "tool_call_blocked", "result_blocked", "prompt_blocked",
+               "arg_pii_blocked", "instructions_poisoned", "listing_poisoned",
+               "tools_list_encoded")
+
+
+def _cmd_log(args) -> int:
+    """The promotion-bar tally, in the suite's shared shape.
+
+    The gate's flow guard ships in warn mode behind a written bar: 20+ real
+    sessions with 0 false blocks on benign flows, then `on_tainted_egress`
+    defaults to `block`. Nothing could report those numbers before this.
+    """
+    import json
+
+    from bastioncorpus.tally import TallySpec, read_log, summarize
+
+    spec = TallySpec(
+        tool="bastiongate",
+        unit="session",
+        counted_as="one MCP session (stdio: one proxy process; HTTP: one Mcp-Session-Id)",
+        session_key="session",
+        rule_key="event",
+        select=lambda r: r.get("event") in _BAR_EVENTS,
+    )
+    try:
+        rows = read_log(args.path)
+    except ValueError as e:
+        print(f"bastiongate: {e}", file=sys.stderr)
+        return 2
+    out = summarize(rows, spec)
+    if rows:
+        # The bar is about false *blocks*, so the warn/block split is the number
+        # that matters. Whether a block was false is a human judgement and stays
+        # in the dogfood notes: this reports only what the log observed.
+        actions: dict[str, dict[str, int]] = {}
+        for row in rows:
+            if row.get("event") in _BAR_EVENTS and row.get("action"):
+                bucket = actions.setdefault(str(row["event"]), {})
+                bucket[str(row["action"])] = bucket.get(str(row["action"]), 0) + 1
+        out["by_action"] = actions
+        out["runs"] = sum(1 for r in rows if r.get("event") == "gate_start")
+    print(json.dumps(out, indent=2))
+    return 0
 
 
 def _cmd_labels(args) -> int:

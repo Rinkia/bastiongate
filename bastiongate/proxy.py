@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -64,6 +65,11 @@ class Gate:
         self.flows = flows.FlowGuard(self._bump, on_shared_error=self._shared_taint_error)
         self._pending: dict = {}  # (session, id) -> (method, tool, ts)
         self._order: OrderedDict = OrderedDict()  # session -> deque of keys; LRU order
+        # Identifies this process in the log. In stdio there is no session id —
+        # one process IS the session — so without this every stdio session logs a
+        # null id and the tally counts 0 sessions no matter how many runs there
+        # were. Random rather than the pid, which is reused.
+        self._run_id = secrets.token_hex(4)
         self._lock = threading.Lock()
         self._metrics: Counter = Counter()
         self._metrics_lock = threading.Lock()
@@ -195,7 +201,7 @@ class Gate:
         action = self.policy.opt(name, "on_tainted_egress")
         self.trace.emit("tainted_egress", id=mid, tool=name, action=action, labels=sorted(labels),
                         untrusted_from=untrusted_from, private_from=private_from,
-                        session=_session_hash(session), cross_server=cross)
+                        session=self._log_session(session), cross_server=cross)
         if action == BLOCK:
             self._bump("tainted_egress_blocked")
             return jsonrpc.error_response(
@@ -625,6 +631,14 @@ class Gate:
         self._bump("result_pii_redacted")
         return redacted
 
+    def _log_session(self, session) -> str:
+        """The session label written to the log.
+
+        A real id is hashed; stdio has none, so the run stands in for it. Both
+        the tally and the flow-guard events go through here, so a session always
+        counts the same way whichever event records it."""
+        return _session_hash(session) or f"run:{self._run_id}"
+
     def _remember(self, session, mid, method, tool, repo=None) -> None:
         now = time.monotonic()
         key = _pending_key(session, mid)
@@ -639,6 +653,9 @@ class Gate:
             dq = self._order.get(session)
             if dq is None:
                 dq = self._order[session] = deque()
+                fresh_session = True
+            else:
+                fresh_session = False
             self._order.move_to_end(session)  # mark most-recently-used
             # reclaim this session's expired entries (oldest-first, cheap)
             while dq and self._pending.get(dq[0], (None, None, 0.0))[2] < now - PENDING_TTL_SECONDS:
@@ -648,6 +665,13 @@ class Gate:
                 self._pending.pop(dq.popleft(), None)
             self._pending[key] = (method, tool, now, repo)
             dq.append(key)
+        if fresh_session:
+            # Once per session, outside the lock. The flow-guard promotion bar is
+            # written in sessions ("20+ real sessions with 0 false blocks"), and
+            # `tainted_egress` is the only other event carrying a session id — so
+            # without this, a *clean* session leaves no trace and the bar cannot
+            # be counted. See suite-tally-DESIGN.md.
+            self.trace.emit("session_seen", session=self._log_session(session))
 
     def _recall(self, session, mid) -> tuple[str | None, str | None, str | None]:
         key = _pending_key(session, mid)
