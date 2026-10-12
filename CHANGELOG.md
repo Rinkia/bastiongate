@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.14.0 (unreleased)
+## 0.14.0 (2026-10-12)
 
 **The flow-guard promotion bar is measurable.** No detector behaviour changed.
 
